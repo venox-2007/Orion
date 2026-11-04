@@ -1,7 +1,8 @@
 """Telegram bot integration for ORION using long polling."""
 
+from typing import Any
 from telegram import Update
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -11,6 +12,11 @@ from telegram.ext import (
     filters,
 )
 
+from orion.integrations.formatter import (
+    clean_markdown_to_plain,
+    markdown_to_telegram_html,
+    split_html_message,
+)
 from orion.integrations.ollama import OllamaClient
 
 UNAUTHORIZED_MESSAGE = "Access restricted: unauthorized user or chat."
@@ -18,29 +24,21 @@ WELCOME_MESSAGE = "Hello! I am ORION, your personal AI assistant. How can I help
 
 
 def split_message(text: str, max_chunk: int = 4000) -> list[str]:
-    """Split response into chunks safe for Telegram's 4096-character limit."""
-    if len(text) <= max_chunk:
-        return [text]
+    """Split response into chunks safe for Telegram's character limit."""
+    return split_html_message(text, max_chunk=max_chunk)
 
-    chunks: list[str] = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= max_chunk:
-            chunks.append(remaining)
-            break
 
-        split_point = remaining.rfind("\n", 0, max_chunk)
-        if split_point == -1 or split_point == 0:
-            split_point = remaining.rfind(" ", 0, max_chunk)
-        if split_point == -1 or split_point == 0:
-            split_point = max_chunk
+async def send_formatted_message(message: Any, text: str) -> None:
+    """Send text formatted as HTML with fallback to clean plain text on parse error."""
+    html_text = markdown_to_telegram_html(text)
+    chunks = split_html_message(html_text)
 
-        chunk = remaining[:split_point].strip()
-        if chunk:
-            chunks.append(chunk)
-        remaining = remaining[split_point:].strip()
-
-    return chunks or [text[:max_chunk]]
+    for chunk in chunks:
+        try:
+            await message.reply_text(chunk, parse_mode=ParseMode.HTML)
+        except Exception:
+            plain_chunk = clean_markdown_to_plain(chunk)
+            await message.reply_text(plain_chunk)
 
 
 def is_authorized_owner(update: Update, owner_id: int) -> bool:
@@ -67,7 +65,7 @@ def create_telegram_app(
             return
 
         if update.effective_message:
-            await update.effective_message.reply_text(WELCOME_MESSAGE)
+            await send_formatted_message(update.effective_message, WELCOME_MESSAGE)
 
     async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not is_authorized_owner(update, owner_id):
@@ -89,8 +87,7 @@ def create_telegram_app(
             )
 
         reply_text = await client.generate_response(user_text)
-        for chunk in split_message(reply_text):
-            await update.effective_message.reply_text(chunk)
+        await send_formatted_message(update.effective_message, reply_text)
 
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle errors cleanly without printing stack traces to chat or stdout."""

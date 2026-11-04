@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
+from telegram.constants import ParseMode
 
 from orion.config.settings import Settings
 from orion.integrations.ollama import (
@@ -138,7 +139,9 @@ async def test_telegram_handlers() -> None:
     update_owner.effective_message.text = "/start"
 
     await start_handler_func(update_owner, context)
-    update_owner.effective_message.reply_text.assert_called_with(WELCOME_MESSAGE)
+    update_owner.effective_message.reply_text.assert_called_with(
+        WELCOME_MESSAGE, parse_mode=ParseMode.HTML
+    )
 
     # 2. Start from unauthorized user
     update_stranger = MagicMock()
@@ -156,7 +159,9 @@ async def test_telegram_handlers() -> None:
 
     await text_handler_func(update_owner, context)
     mock_ollama.generate_response.assert_called_with("Tell me a joke")
-    update_owner.effective_message.reply_text.assert_called_with("Here is the answer.")
+    update_owner.effective_message.reply_text.assert_called_with(
+        "Here is the answer.", parse_mode=ParseMode.HTML
+    )
 
     # 4. Message from unauthorized user
     update_stranger.effective_message.reply_text.reset_mock()
