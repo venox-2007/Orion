@@ -113,7 +113,7 @@ async def test_ollama_client_unavailable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_telegram_handlers() -> None:
+async def test_telegram_handlers(tmp_path) -> None:
     """Test Telegram start and message handlers with mocked updates."""
     mock_ollama = MagicMock()
     mock_ollama.generate_response = AsyncMock(return_value="Here is the answer.")
@@ -121,11 +121,19 @@ async def test_telegram_handlers() -> None:
     owner_id = 55555
     token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 
-    app = create_telegram_app(token=token, owner_id=owner_id, ollama_client=mock_ollama)
+    from orion.memory.database import ConversationMemory
+    mem = ConversationMemory(db_path=str(tmp_path / "test_handlers.db"))
+
+    app = create_telegram_app(
+        token=token,
+        owner_id=owner_id,
+        ollama_client=mock_ollama,
+        memory=mem,
+    )
 
     # Extract start and text message handler callbacks
     start_handler_func = app.handlers[0][0].callback
-    text_handler_func = app.handlers[0][1].callback
+    text_handler_func = app.handlers[0][-1].callback
 
     context = MagicMock()
     context.bot.send_chat_action = AsyncMock()
@@ -158,7 +166,7 @@ async def test_telegram_handlers() -> None:
     update_owner.effective_message.text = "Tell me a joke"
 
     await text_handler_func(update_owner, context)
-    mock_ollama.generate_response.assert_called_with("Tell me a joke")
+    mock_ollama.generate_response.assert_called_with("Tell me a joke", history=[])
     update_owner.effective_message.reply_text.assert_called_with(
         "Here is the answer.", parse_mode=ParseMode.HTML
     )

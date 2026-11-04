@@ -27,7 +27,7 @@ def clean_markdown_to_plain(text: str) -> str:
     # Unescape HTML entities
     cleaned = html.unescape(cleaned)
     # Remove code fence markers
-    cleaned = re.sub(r"```[a-zA-Z0-9_\-]*\n?", "", cleaned)
+    cleaned = re.sub(r"```[a-zA-Z0-9_\-]*[ \t]*\n?", "", cleaned)
     # Remove inline code backticks
     cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
     # Remove bold/italic asterisks and underscores
@@ -44,6 +44,10 @@ def markdown_to_telegram_html(text: str) -> str:
     """Convert Markdown to Telegram-supported HTML while escaping untrusted input."""
     if not text:
         return ""
+
+    # Auto-close trailing unclosed code block if truncated or missing closing fence
+    if text.count("```") % 2 != 0:
+        text = text + "\n```"
 
     # 1. Protect multiline code blocks first
     code_blocks: list[str] = []
@@ -62,7 +66,7 @@ def markdown_to_telegram_html(text: str) -> str:
         return f"\x00BLOCK_{idx}\x00"
 
     processed = re.sub(
-        r"```(?:([a-zA-Z0-9_\-]+)\r?\n)?([\s\S]*?)```",
+        r"```(?:([a-zA-Z0-9_\-]+)[ \t]*\r?\n)?([\s\S]*?)```",
         replace_code_block,
         text,
     )

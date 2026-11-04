@@ -41,15 +41,20 @@ class OllamaClient:
     async def generate_response(
         self,
         user_message: str,
+        history: list[dict[str, str]] | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     ) -> str:
         """Send chat messages to the local Ollama API and return a clean response."""
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": system_prompt}
+        ]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
+
         payload = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
+            "messages": messages,
             "stream": False,
             "think": False,
             "keep_alive": "30m",

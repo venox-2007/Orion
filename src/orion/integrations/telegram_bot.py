@@ -1,5 +1,6 @@
 """Telegram bot integration for ORION using long polling."""
 
+import asyncio
 from typing import Any
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
@@ -12,15 +13,22 @@ from telegram.ext import (
     filters,
 )
 
+from orion.config.settings import get_settings
 from orion.integrations.formatter import (
     clean_markdown_to_plain,
     markdown_to_telegram_html,
     split_html_message,
 )
-from orion.integrations.ollama import OllamaClient
+from orion.integrations.ollama import OLLAMA_UNAVAILABLE_MESSAGE, OllamaClient
+from orion.memory.database import ConversationMemory
 
 UNAUTHORIZED_MESSAGE = "Access restricted: unauthorized user or chat."
 WELCOME_MESSAGE = "Hello! I am ORION, your personal AI assistant. How can I help you today?"
+RESET_CONFIRMATION_PROMPT = (
+    "Are you sure you want to clear your conversation history? "
+    "To proceed, send:\n`/reset confirm`"
+)
+RESET_SUCCESS_MESSAGE = "Conversation memory has been cleared."
 
 
 def split_message(text: str, max_chunk: int = 4000) -> list[str]:
@@ -54,9 +62,13 @@ def create_telegram_app(
     token: str,
     owner_id: int,
     ollama_client: OllamaClient | None = None,
+    memory: ConversationMemory | None = None,
 ) -> Application:
     """Build and configure the Telegram application with handlers."""
     client = ollama_client or OllamaClient()
+    conv_memory = memory or ConversationMemory()
+    settings = get_settings()
+    user_lock = asyncio.Lock()
 
     async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not is_authorized_owner(update, owner_id):
@@ -66,6 +78,23 @@ def create_telegram_app(
 
         if update.effective_message:
             await send_formatted_message(update.effective_message, WELCOME_MESSAGE)
+
+    async def reset_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if not update.effective_message:
+            return
+
+        args = context.args or []
+        if args and args[0].strip().lower() == "confirm":
+            async with user_lock:
+                conv_memory.clear_history(owner_id)
+            await send_formatted_message(update.effective_message, RESET_SUCCESS_MESSAGE)
+        else:
+            await send_formatted_message(update.effective_message, RESET_CONFIRMATION_PROMPT)
 
     async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not is_authorized_owner(update, owner_id):
@@ -86,7 +115,17 @@ def create_telegram_app(
                 action=ChatAction.TYPING,
             )
 
-        reply_text = await client.generate_response(user_text)
+        async with user_lock:
+            history = conv_memory.get_recent_messages(
+                user_id=owner_id,
+                limit=settings.max_history_messages,
+            )
+            reply_text = await client.generate_response(user_text, history=history)
+
+            if reply_text != OLLAMA_UNAVAILABLE_MESSAGE:
+                conv_memory.add_message(owner_id, "user", user_text)
+                conv_memory.add_message(owner_id, "assistant", reply_text)
+
         await send_formatted_message(update.effective_message, reply_text)
 
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -101,6 +140,7 @@ def create_telegram_app(
 
     app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(CommandHandler("reset", reset_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_error_handler(error_handler)
 

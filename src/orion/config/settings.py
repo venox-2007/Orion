@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_timeout: float = 60.0
 
+    # Memory & storage configuration
+    database_path: str = "data/orion.db"
+    max_history_messages: int = 10
+
     model_config = SettingsConfigDict(
         env_prefix="ORION_",
         env_file=".env",
