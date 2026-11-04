@@ -56,15 +56,33 @@ def find_files(query: str, directory: str) -> dict[str, Any]:
     matches: list[dict[str, Any]] = []
     base_depth = len(resolved.parts)
 
-    for root, dirs, files in os.walk(resolved):
+    for root, dirs, files in os.walk(resolved, followlinks=False):
         cur_depth = len(Path(root).parts) - base_depth
         if cur_depth >= MAX_SEARCH_DEPTH:
             dirs.clear()  # Do not recurse deeper
 
+        # Prune symlinks/junctions to prevent escape outside approved directory
+        safe_dirs = []
+        for d in dirs:
+            dir_path = Path(root) / d
+            try:
+                resolved_dir = dir_path.resolve()
+                resolved_dir.relative_to(resolved)
+                safe_dirs.append(d)
+            except (ValueError, OSError):
+                continue
+        dirs[:] = safe_dirs
+
         for filename in files:
+            file_path = Path(root) / filename
+            try:
+                resolved_file = file_path.resolve()
+                resolved_file.relative_to(resolved)
+            except (ValueError, OSError):
+                continue
+
             if query_lower in filename.lower():
-                full_p = Path(root) / filename
-                rel_p = str(full_p.relative_to(resolved))
+                rel_p = str(resolved_file.relative_to(resolved))
                 matches.append({"name": filename, "relative_path": rel_p})
                 if len(matches) >= MAX_SEARCH_RESULTS:
                     return {

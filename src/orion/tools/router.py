@@ -10,10 +10,14 @@ TOOL_ROUTER_SYSTEM_PROMPT = (
     "Available tools:\n"
     "- get_battery_status: Get battery percentage and charging status. No arguments.\n"
     "- get_system_resources: Get CPU, RAM, and disk utilization. No arguments.\n"
-    '- list_files: List files in an approved directory. Arguments: {"directory": "<path>"}\n'
-    '- find_files: Search files by filename in an approved directory. Arguments: {"query": "<name>", "directory": "<path>"}\n'
-    '- get_file_info: Get metadata (size, timestamp) of an approved file. Arguments: {"path": "<path>"}\n\n'
-    "Rules:\n"
+    '- list_files: List files in an approved directory. Arguments: {"directory": "<alias_or_path>"}\n'
+    '- find_files: Search files by filename in an approved directory. Arguments: {"query": "<name>", "directory": "<alias_or_path>"}\n'
+    '- get_file_info: Get metadata of an approved file. Arguments: {"path": "<alias_or_path>"}\n\n'
+    "Rules for directory and file paths:\n"
+    "- For standard folders, use folder aliases: 'Downloads', 'Documents', or 'Desktop' (e.g. {'directory': 'Downloads'}).\n"
+    "- Never invent usernames or placeholder paths like 'C:\\\\Users\\\\[username]\\\\' or '%USERPROFILE%'.\n"
+    "- If the user names a folder (e.g. 'Downloads'), supply that alias name directly.\n\n"
+    "Routing Rules:\n"
     '1. If the user asks a general conversation question, return: {"tool": null}\n'
     '2. If the user asks for unsupported actions (e.g., launching apps, modifying files, executing code, browser tools), return: {"tool": null, "unsupported": true}\n'
     '3. If the user asks for one of the 5 tools above, return: {"tool": "<tool_name>", "arguments": {...}}\n'
@@ -25,6 +29,15 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
     """Format tool execution results into concise, human-readable text without raw JSON."""
     if not result.get("success"):
         error_msg = result.get("error", "Unknown error")
+        lower_err = error_msg.lower()
+        if "outside permitted" in lower_err or "access denied" in lower_err:
+            return "Access denied: That directory or file is outside your permitted folders. You can authorize folders in ORION_ALLOWED_DIRECTORIES."
+        if "disabled" in lower_err:
+            return "Filesystem access is currently disabled. Configure ORION_ALLOWED_DIRECTORIES in your .env file to enable it."
+        if "does not exist" in lower_err or "not found" in lower_err:
+            return "The requested file or directory was not found."
+        if "placeholder" in lower_err or "unpermitted" in lower_err:
+            return "Invalid folder path or unrecognized placeholder."
         return f"Unable to complete request: {error_msg}"
 
     data = result.get("data", {})
