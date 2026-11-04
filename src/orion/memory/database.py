@@ -102,6 +102,31 @@ class ConversationMemory:
                     ON action_history(user_id)
                     """
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS execution_workflows (
+                        id TEXT PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        goal TEXT NOT NULL,
+                        steps_json TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        created_at REAL NOT NULL,
+                        expires_at REAL NOT NULL,
+                        completed_at REAL,
+                        error_summary TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_execution_workflows_user_id
+                    ON execution_workflows(user_id)
+                    """
+                )
+                # On startup/restart, safely mark any interrupted workflows
+                conn.execute(
+                    "UPDATE execution_workflows SET status = 'interrupted' WHERE status = 'running'"
+                )
                 conn.commit()
 
     def add_message(self, user_id: int, role: str, content: str) -> None:
@@ -370,3 +395,171 @@ class ConversationMemory:
                 }
             )
         return history
+
+    def create_execution_workflow(
+        self,
+        user_id: int,
+        goal: str,
+        steps: list[dict[str, Any]],
+        ttl_seconds: int = 300,
+    ) -> str:
+        """Create a pending multi-step execution workflow requiring explicit confirmation."""
+        workflow_id = uuid.uuid4().hex
+        now = time.time()
+        expires_at = now + ttl_seconds
+        steps_serialized = json.dumps(steps)
+
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO execution_workflows (id, user_id, goal, steps_json, status, created_at, expires_at)
+                    VALUES (?, ?, ?, ?, 'pending', ?, ?)
+                    """,
+                    (workflow_id, user_id, goal.strip(), steps_serialized, now, expires_at),
+                )
+                conn.commit()
+        return workflow_id
+
+    def get_execution_workflow(self, workflow_id: str, user_id: int | None = None) -> dict[str, Any] | None:
+        """Retrieve an execution workflow. Updates status to 'expired' if TTL elapsed while pending."""
+        query = (
+            "SELECT id, user_id, goal, steps_json, status, created_at, expires_at, completed_at, error_summary "
+            "FROM execution_workflows WHERE id = ?"
+        )
+        params: list[Any] = [workflow_id]
+        if user_id is not None:
+            query += " AND user_id = ?"
+            params.append(user_id)
+
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.execute(query, params)
+                row = cursor.fetchone()
+                if not row:
+                    return None
+
+                w_id, uid, goal, steps_json, status, created, expires, completed, error = row
+                now = time.time()
+                if status == "pending" and now > expires:
+                    conn.execute("UPDATE execution_workflows SET status = 'expired' WHERE id = ?", (w_id,))
+                    conn.commit()
+                    status = "expired"
+
+        try:
+            steps = json.loads(steps_json)
+        except Exception:
+            steps = []
+
+        return {
+            "id": w_id,
+            "user_id": uid,
+            "goal": goal,
+            "steps": steps,
+            "status": status,
+            "created_at": created,
+            "expires_at": expires,
+            "completed_at": completed,
+            "error_summary": error,
+        }
+
+    def claim_execution_workflow(self, workflow_id: str) -> bool:
+        """Atomically claim workflow for execution from 'pending' to 'running'.
+
+        Returns True if claimed, False if already running, completed, cancelled, or expired.
+        """
+        now = time.time()
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.execute(
+                    "UPDATE execution_workflows SET status = 'running' WHERE id = ? AND status = 'pending' AND expires_at > ?",
+                    (workflow_id, now),
+                )
+                updated = cursor.rowcount > 0
+                conn.commit()
+        return updated
+
+    def cancel_execution_workflow(self, workflow_id: str) -> bool:
+        """Atomically mark a pending workflow as cancelled."""
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.execute(
+                    "UPDATE execution_workflows SET status = 'cancelled' WHERE id = ? AND status = 'pending'",
+                    (workflow_id,),
+                )
+                updated = cursor.rowcount > 0
+                conn.commit()
+        return updated
+
+    def update_execution_workflow_step(
+        self,
+        workflow_id: str,
+        steps: list[dict[str, Any]],
+        error_summary: str | None = None,
+    ) -> None:
+        """Persist workflow step progress immediately after each operation."""
+        steps_serialized = json.dumps(steps)
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "UPDATE execution_workflows SET steps_json = ?, error_summary = coalesce(?, error_summary) WHERE id = ?",
+                    (steps_serialized, error_summary, workflow_id),
+                )
+                conn.commit()
+
+    def finish_execution_workflow(
+        self,
+        workflow_id: str,
+        status: str,
+        steps: list[dict[str, Any]],
+        error_summary: str | None = None,
+    ) -> None:
+        """Finalize workflow status and completed timestamp."""
+        now = time.time()
+        steps_serialized = json.dumps(steps)
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute(
+                    """
+                    UPDATE execution_workflows
+                    SET status = ?, steps_json = ?, completed_at = ?, error_summary = ?
+                    WHERE id = ?
+                    """,
+                    (status, steps_serialized, now, error_summary, workflow_id),
+                )
+                conn.commit()
+
+    def get_recent_execution_workflows(self, user_id: int, limit: int = 5) -> list[dict[str, Any]]:
+        """Retrieve recent workflows for audit/review."""
+        if limit <= 0:
+            return []
+        query = """
+            SELECT id, goal, steps_json, status, created_at, completed_at, error_summary
+            FROM execution_workflows
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.execute(query, (user_id, limit))
+                rows = cursor.fetchall()
+
+        workflows = []
+        for row in rows:
+            try:
+                steps = json.loads(row[2])
+            except Exception:
+                steps = []
+            workflows.append(
+                {
+                    "id": row[0],
+                    "goal": row[1],
+                    "steps": steps,
+                    "status": row[3],
+                    "created_at": row[4],
+                    "completed_at": row[5],
+                    "error_summary": row[6],
+                }
+            )
+        return workflows

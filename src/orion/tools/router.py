@@ -34,8 +34,9 @@ TOOL_ROUTER_SYSTEM_PROMPT = (
     "Routing Rules:\n"
     '1. If the user asks a general conversation question, return: {"tool": null}\n'
     '2. If the user asks for unsupported actions (e.g., deleting/removing files, overwriting existing files, running shell/scripts/code, launching apps, browser automation), return: {"tool": null, "unsupported": true}\n'
-    '3. If the user asks for one of the sanctioned tools above, return: {"tool": "<tool_name>", "arguments": {...}}\n'
-    "4. Return strict JSON only. Select at most one tool per request. Do not invent tools."
+    '3. If the user asks for a single tool above, return: {"tool": "<tool_name>", "arguments": {...}}\n'
+    '4. If the user asks for a multi-step workflow (2 or 3 file operations), return: {"is_workflow": true, "steps": [{"step_id": 1, "tool": "<name>", "arguments": {...}, "description": "..."}, ...]}\n'
+    "5. Return strict JSON only. Never exceed 3 steps. Do not invent tools."
 )
 
 
@@ -225,6 +226,41 @@ async def route_and_execute_tool(
         return {
             "handled": True,
             "reply": "I cannot perform that action. I only have access to safe system monitoring and controlled file operations (deletion, overwriting, and arbitrary commands are strictly prohibited).",
+        }
+
+    # Handle multi-step execution workflows (Step 7)
+    if routing_data.get("is_workflow"):
+        from orion.core.execution_engine import (
+            ExecutionPlan,
+            format_workflow_proposal,
+            generate_execution_plan,
+            simulate_and_validate_workflow,
+        )
+
+        steps_raw = routing_data.get("steps")
+        plan = None
+        if steps_raw and isinstance(steps_raw, list):
+            try:
+                plan = ExecutionPlan(goal=clean_text, steps=steps_raw)
+            except Exception:
+                plan = None
+
+        if plan is None:
+            plan, err = await generate_execution_plan(clean_text, client=ollama)
+            if not plan:
+                return {"handled": True, "reply": err or "Unable to construct a valid workflow plan."}
+
+        valid, error_msg, validated_steps = simulate_and_validate_workflow(plan, registry=reg)
+        if not valid:
+            return {"handled": True, "reply": f"Cannot execute workflow: {error_msg}"}
+
+        proposal_text = format_workflow_proposal(clean_text, validated_steps)
+        return {
+            "handled": True,
+            "is_workflow_proposal": True,
+            "goal": clean_text,
+            "steps": validated_steps,
+            "proposal_text": proposal_text,
         }
 
     if not tool_name or not isinstance(tool_name, str):

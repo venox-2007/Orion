@@ -227,6 +227,86 @@ def create_telegram_app(
         formatted = format_plan_message(plan["id"], plan["goal"], plan["steps"])
         await send_formatted_message(update.effective_message, formatted)
 
+    async def workflow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle explicit /workflow or /run requests for multi-step filesystem workflows."""
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if not update.effective_message:
+            return
+
+        raw_text = update.effective_message.text or ""
+        parts = raw_text.split(maxsplit=1)
+        goal = parts[1].strip() if len(parts) > 1 else ""
+
+        if not goal:
+            await send_formatted_message(
+                update.effective_message,
+                "Please specify a workflow goal. Example:\n`/workflow Create folder College Notes in Downloads and move notes.pdf into it`",
+            )
+            return
+
+        if update.effective_chat:
+            await context.bot.send_chat_action(
+                chat_id=update.effective_chat.id,
+                action=ChatAction.TYPING,
+            )
+
+        async with user_lock:
+            from orion.core.execution_engine import (
+                format_workflow_proposal,
+                generate_execution_plan,
+                simulate_and_validate_workflow,
+            )
+
+            plan, err = await generate_execution_plan(goal, client=client)
+            if not plan:
+                await send_formatted_message(
+                    update.effective_message,
+                    err or "Unable to generate an executable plan for this goal.",
+                )
+                return
+
+            valid, err_msg, validated_steps = simulate_and_validate_workflow(plan, registry=reg)
+            if not valid:
+                await send_formatted_message(
+                    update.effective_message,
+                    f"Cannot execute workflow: {err_msg}",
+                )
+                return
+
+            workflow_id = conv_memory.create_execution_workflow(
+                user_id=owner_id,
+                goal=goal,
+                steps=validated_steps,
+                ttl_seconds=300,
+            )
+            proposal_text = format_workflow_proposal(goal, validated_steps)
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Approve All", callback_data=f"wf_approve:{workflow_id}"),
+                        InlineKeyboardButton("Cancel", callback_data=f"wf_cancel:{workflow_id}"),
+                    ]
+                ]
+            )
+            html_msg = markdown_to_telegram_html(proposal_text)
+            try:
+                await update.effective_message.reply_text(
+                    html_msg,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard,
+                )
+            except Exception:
+                await update.effective_message.reply_text(
+                    clean_markdown_to_plain(proposal_text),
+                    reply_markup=keyboard,
+                )
+            conv_memory.add_message(owner_id, "user", raw_text)
+            conv_memory.add_message(owner_id, "assistant", proposal_text)
+
     async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not is_authorized_owner(update, owner_id):
             if update.effective_message:
@@ -250,6 +330,38 @@ def create_telegram_app(
             # 1. Attempt natural-language tool routing first
             tool_res = await route_and_execute_tool(user_text, ollama_client=client, registry=reg)
             if tool_res and tool_res.get("handled"):
+                if tool_res.get("is_workflow_proposal"):
+                    workflow_id = conv_memory.create_execution_workflow(
+                        user_id=owner_id,
+                        goal=tool_res["goal"],
+                        steps=tool_res["steps"],
+                        ttl_seconds=300,
+                    )
+                    proposal_text = tool_res.get("proposal_text", "")
+                    keyboard = InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton("Approve All", callback_data=f"wf_approve:{workflow_id}"),
+                                InlineKeyboardButton("Cancel", callback_data=f"wf_cancel:{workflow_id}"),
+                            ]
+                        ]
+                    )
+                    html_msg = markdown_to_telegram_html(proposal_text)
+                    try:
+                        await update.effective_message.reply_text(
+                            html_msg,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=keyboard,
+                        )
+                    except Exception:
+                        await update.effective_message.reply_text(
+                            clean_markdown_to_plain(proposal_text),
+                            reply_markup=keyboard,
+                        )
+                    conv_memory.add_message(owner_id, "user", user_text)
+                    conv_memory.add_message(owner_id, "assistant", proposal_text)
+                    return
+
                 if tool_res.get("is_proposal"):
                     action_id = conv_memory.create_pending_action(
                         user_id=owner_id,
@@ -318,6 +430,70 @@ def create_telegram_app(
         action, action_id = data.split(":", 1)
 
         async with user_lock:
+            # Handle multi-step execution workflows (Step 7)
+            if action == "wf_cancel":
+                success = conv_memory.cancel_execution_workflow(action_id)
+                if success:
+                    cancel_msg = "Task cancelled. No filesystem changes were made."
+                    try:
+                        await query.edit_message_text(cancel_msg)
+                    except Exception:
+                        pass
+                    conv_memory.add_message(owner_id, "assistant", cancel_msg)
+                else:
+                    await query.edit_message_text(
+                        "This workflow is no longer active (already completed, cancelled, or expired)."
+                    )
+                return
+
+            if action == "wf_approve":
+                workflow = conv_memory.get_execution_workflow(action_id, user_id=owner_id)
+                if not workflow:
+                    await query.edit_message_text("Workflow not found.")
+                    return
+
+                if workflow["status"] != "pending":
+                    msg = (
+                        "⏱️ This task proposal has expired. No changes were made."
+                        if workflow["status"] == "expired"
+                        else "⚠️ This workflow was already processed."
+                    )
+                    await query.edit_message_text(msg)
+                    return
+
+                # Atomically claim workflow to prevent duplicate or concurrent execution
+                claimed = conv_memory.claim_execution_workflow(action_id)
+                if not claimed:
+                    await query.edit_message_text("⚠️ This workflow was already processed.")
+                    return
+
+                # Acknowledge execution start
+                try:
+                    await query.edit_message_text("Working on your request...")
+                except Exception:
+                    pass
+
+                from orion.core.execution_engine import execute_workflow
+
+                res = await execute_workflow(
+                    workflow_id=action_id,
+                    steps=workflow["steps"],
+                    user_id=owner_id,
+                    memory=conv_memory,
+                    registry=reg,
+                )
+
+                result_msg = res.get("message", "Workflow finished.")
+                html_res = markdown_to_telegram_html(result_msg)
+                try:
+                    await query.edit_message_text(html_res, parse_mode=ParseMode.HTML)
+                except Exception:
+                    await query.edit_message_text(clean_markdown_to_plain(result_msg))
+
+                conv_memory.add_message(owner_id, "assistant", result_msg)
+                return
+
+            # Handle single-action file operations (Step 6)
             if action == "cancel":
                 success = conv_memory.mark_pending_action_status(
                     action_id,
@@ -408,6 +584,7 @@ def create_telegram_app(
     app.add_handler(CommandHandler("plan", plan_handler))
     app.add_handler(CommandHandler("tasks", tasks_handler))
     app.add_handler(CommandHandler("task", task_handler))
+    app.add_handler(CommandHandler(["workflow", "run"], workflow_handler))
     app.add_handler(CallbackQueryHandler(confirmation_callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_error_handler(error_handler)
