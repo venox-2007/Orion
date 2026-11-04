@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from orion.config.settings import get_settings
 from orion.tools.registry import ToolRegistry, default_tool_registry
-from orion.tools.security import resolve_folder_alias, validate_safe_path
+from orion.tools.security import prettify_path, resolve_folder_alias, validate_safe_path
 
 if TYPE_CHECKING:
     from orion.integrations.ollama import OllamaClient
@@ -187,6 +187,9 @@ def simulate_and_validate_workflow(
 
             elif step.tool == "create_text_file":
                 raw_path = clean_args["path"]
+                content = clean_args.get("content", "")
+                if not is_representable_text(content):
+                    return False, f"Step {step.step_id}: File content contains unprintable or binary characters that cannot be clearly displayed for review.", []
                 dest = validate_safe_path(raw_path, must_exist=False)
 
                 if dest.exists() or dest in simulated_created_files:
@@ -280,6 +283,30 @@ def simulate_and_validate_workflow(
     return True, "", validated_steps
 
 
+def is_representable_text(content: str) -> bool:
+    """Ensure text content contains only readable/printable characters without binary data."""
+    if "\x00" in content:
+        return False
+    unprintable = sum(1 for c in content if ord(c) < 32 and c not in ("\n", "\r", "\t"))
+    return unprintable == 0
+
+
+def format_content_preview(content: str, max_preview_bytes: int = 200) -> str:
+    """Format content preview with clear labeling and byte count."""
+    encoded = content.encode("utf-8")
+    total_bytes = len(encoded)
+
+    if total_bytes <= max_preview_bytes:
+        return f"Content ({total_bytes} bytes):\n```\n{content}\n```"
+
+    truncated_text = encoded[:max_preview_bytes].decode("utf-8", errors="ignore")
+    return (
+        f"Content (preview of first {len(truncated_text.encode('utf-8'))} of {total_bytes} bytes):\n"
+        f"```\n{truncated_text}...\n```\n"
+        f"*(Note: Truncated preview. Full file will contain {total_bytes} bytes.)*"
+    )
+
+
 def format_workflow_proposal(goal: str, steps: list[dict[str, Any]]) -> str:
     """Format the complete proposed multi-step workflow for Telegram user approval."""
     lines = [
@@ -289,30 +316,52 @@ def format_workflow_proposal(goal: str, steps: list[dict[str, Any]]) -> str:
     for i, step in enumerate(steps, start=1):
         tool = step.get("tool", "")
         args = step.get("arguments", {})
-        desc = step.get("description", "").strip()
 
         if tool == "create_directory":
             path_str = args.get("path", "")
-            name = Path(path_str).name or path_str
-            parent = Path(path_str).parent.name or str(Path(path_str).parent)
+            pretty = prettify_path(path_str)
+            name = Path(pretty).name or pretty
+            parent = str(Path(pretty).parent).replace("\\", "/")
+            if parent == ".":
+                parent = prettify_path(Path(path_str).parent)
             lines.append(f"{i}. Create folder: `{name}`\n   Location: `{parent}`\n")
         elif tool == "create_text_file":
             path_str = args.get("path", "")
-            name = Path(path_str).name or path_str
-            lines.append(f"{i}. Create text file: `{name}`\n")
-        elif tool == "copy_file":
-            src = Path(args.get("source", "")).name
-            dst = Path(args.get("destination", "")).name
-            lines.append(f"{i}. Copy file: `{src}`\n   Destination: `{dst}`\n")
-        elif tool == "move_file":
-            src = Path(args.get("source", "")).name
-            dst = Path(args.get("destination", "")).name
-            lines.append(f"{i}. Move file: `{src}`\n   Destination: `{dst}`\n")
+            pretty = prettify_path(path_str)
+            name = Path(pretty).name or pretty
+            parent = str(Path(pretty).parent).replace("\\", "/")
+            if parent == ".":
+                parent = prettify_path(Path(path_str).parent)
+            content = args.get("content", "")
+            preview_block = format_content_preview(content)
+            lines.append(
+                f"{i}. Create text file: `{name}`\n"
+                f"   Location: `{parent}`\n"
+                f"   {preview_block}\n"
+            )
+        elif tool in ("copy_file", "move_file"):
+            action_name = "Copy file" if tool == "copy_file" else "Move file"
+            src_pretty = prettify_path(args.get("source", ""))
+            dst_pretty = prettify_path(args.get("destination", ""))
+            src_name = Path(src_pretty).name
+            src_parent = str(Path(src_pretty).parent).replace("\\", "/")
+            lines.append(
+                f"{i}. {action_name}: `{src_name}`\n"
+                f"   From: `{src_parent}`\n"
+                f"   Destination: `{dst_pretty}`\n"
+            )
         elif tool == "rename_file":
-            src = Path(args.get("source", "")).name
+            src_pretty = prettify_path(args.get("source", ""))
+            src_name = Path(src_pretty).name
+            src_parent = str(Path(src_pretty).parent).replace("\\", "/")
             new_name = args.get("new_name", "")
-            lines.append(f"{i}. Rename file: `{src}` -> `{new_name}`\n")
+            lines.append(
+                f"{i}. Rename file: `{src_name}`\n"
+                f"   Location: `{src_parent}`\n"
+                f"   New Name: `{new_name}`\n"
+            )
         else:
+            desc = step.get("description", "").strip()
             lines.append(f"{i}. {desc}\n")
 
     count = len(steps)

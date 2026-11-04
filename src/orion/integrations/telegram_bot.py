@@ -28,6 +28,16 @@ from orion.tools.router import format_tool_result, route_and_execute_tool
 
 UNAUTHORIZED_MESSAGE = "Access restricted: unauthorized user or chat."
 WELCOME_MESSAGE = "Hello! I am ORION, your personal AI assistant. How can I help you today?"
+HELP_MESSAGE = (
+    "**ORION Commands:**\n"
+    "• `/status` — View current running and pending task status\n"
+    "• `/history` — View recent task activity history\n"
+    "• `/cancel` — Cancel pending execution proposals\n"
+    "• `/plan <goal>` — Generate structured action plan\n"
+    "• `/tasks` — View recent action plans\n"
+    "• `/task <id>` — View details of a specific plan\n"
+    "• `/reset` — Clear conversation history"
+)
 RESET_CONFIRMATION_PROMPT = (
     "Are you sure you want to clear your conversation history? "
     "To proceed, send:\n`/reset confirm`"
@@ -100,6 +110,15 @@ def create_telegram_app(
 
         if update.effective_message:
             await send_formatted_message(update.effective_message, WELCOME_MESSAGE)
+
+    async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if update.effective_message:
+            await send_formatted_message(update.effective_message, HELP_MESSAGE)
 
     async def reset_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not is_authorized_owner(update, owner_id):
@@ -307,6 +326,172 @@ def create_telegram_app(
             conv_memory.add_message(owner_id, "user", raw_text)
             conv_memory.add_message(owner_id, "assistant", proposal_text)
 
+    async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Display current running task, pending execution approvals, and latest execution outcome."""
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if not update.effective_message:
+            return
+
+        async with user_lock:
+            running = conv_memory.get_running_workflow(owner_id)
+            pending_wf = conv_memory.get_pending_workflows(owner_id)
+            pending_single = conv_memory.get_pending_single_actions(owner_id)
+            pending_total = len(pending_wf) + len(pending_single)
+            outcome = conv_memory.get_latest_execution_outcome(owner_id)
+
+        lines = ["**ORION — Task Status**\n"]
+
+        if running:
+            goal_short = running["goal"][:60] + ("..." if len(running["goal"]) > 60 else "")
+            lines.append(f"• **Running:** `{goal_short}`")
+        else:
+            lines.append("No tasks currently running.")
+
+        lines.append(f"\n**Pending approval:** {pending_total}")
+
+        if outcome:
+            summary = outcome.get("summary", "Task")
+            status_raw = outcome.get("status", "unknown").lower()
+            if status_raw in ("completed", "success"):
+                status_str = "Completed successfully."
+            elif status_raw == "failed":
+                status_str = "Failed."
+            elif status_raw == "cancelled":
+                status_str = "Cancelled."
+            elif status_raw == "interrupted":
+                status_str = "Interrupted."
+            elif status_raw == "expired":
+                status_str = "Expired without approval."
+            else:
+                status_str = status_raw.capitalize()
+            lines.append(f"**Last task:** {summary} — {status_str}")
+        else:
+            lines.append("**Last task:** None recorded yet.")
+
+        await send_formatted_message(update.effective_message, "\n".join(lines))
+
+    async def history_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Display the latest 10 execution workflows/actions without sensitive internals."""
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if not update.effective_message:
+            return
+
+        async with user_lock:
+            history = conv_memory.get_unified_history(owner_id, limit=10)
+
+        if not history:
+            await send_formatted_message(update.effective_message, "No recent activity recorded.")
+            return
+
+        lines = ["**Recent Activity:**\n"]
+        for i, item in enumerate(history, start=1):
+            summary = item.get("summary", "Action")
+            status_raw = item.get("status", "unknown").lower()
+            if status_raw in ("completed", "success"):
+                status_str = "Completed"
+            elif status_raw == "failed":
+                status_str = "Failed"
+            elif status_raw == "cancelled":
+                status_str = "Cancelled"
+            elif status_raw == "expired":
+                status_str = "Expired"
+            elif status_raw == "interrupted":
+                status_str = "Interrupted"
+            elif status_raw == "running":
+                status_str = "Running"
+            else:
+                status_str = status_raw.capitalize()
+
+            ts = item.get("timestamp", 0)
+            if ts:
+                import datetime
+
+                dt = datetime.datetime.fromtimestamp(ts)
+                time_str = dt.strftime("%Y-%m-%d %H:%M")
+            else:
+                time_str = "N/A"
+
+            step_info = ""
+            total = item.get("total_steps", 1)
+            if total > 1:
+                comp = item.get("completed_steps", 0)
+                step_info = f" ({comp}/{total} steps)"
+
+            lines.append(f"{i}. {summary}{step_info} — **{status_str}** *({time_str})*")
+
+        await send_formatted_message(update.effective_message, "\n".join(lines))
+
+    async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /cancel to safely abort pending execution proposals."""
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if not update.effective_message:
+            return
+
+        async with user_lock:
+            running = conv_memory.get_running_workflow(owner_id)
+            pending_wf = conv_memory.get_pending_workflows(owner_id)
+            pending_single = conv_memory.get_pending_single_actions(owner_id)
+
+            total_pending = len(pending_wf) + len(pending_single)
+
+            if total_pending == 0:
+                if running:
+                    await send_formatted_message(
+                        update.effective_message,
+                        "A task is currently running. Running filesystem operations cannot be safely cancelled through this command.",
+                    )
+                else:
+                    await send_formatted_message(
+                        update.effective_message,
+                        "No pending execution proposals to cancel.",
+                    )
+                return
+
+            if total_pending == 1:
+                if pending_wf:
+                    item = pending_wf[0]
+                    conv_memory.cancel_execution_workflow(item["id"])
+                    name = item["goal"]
+                else:
+                    item = pending_single[0]
+                    conv_memory.cancel_pending_action(item["id"], owner_id)
+                    name = item["action_type"].replace("_", " ").title()
+
+                cancel_msg = f"Pending task `{name}` has been cancelled. No filesystem changes were made."
+                conv_memory.add_message(owner_id, "assistant", cancel_msg)
+                await send_formatted_message(update.effective_message, cancel_msg)
+                return
+
+            # Multiple pending: show selectable inline options
+            lines = ["Multiple pending proposals found. Select one to cancel:\n"]
+            buttons = []
+            for wf in pending_wf:
+                short_goal = wf["goal"][:25] + ("..." if len(wf["goal"]) > 25 else "")
+                lines.append(f"• `{wf['goal']}`")
+                buttons.append([InlineKeyboardButton(f"Cancel: {short_goal}", callback_data=f"wf_cancel:{wf['id']}")])
+
+            for sa in pending_single:
+                act_name = sa["action_type"].replace("_", " ").title()
+                buttons.append([InlineKeyboardButton(f"Cancel: {act_name}", callback_data=f"cancel:{sa['id']}")])
+
+            buttons.append([InlineKeyboardButton("Cancel All", callback_data="cancel_all_pending")])
+            keyboard = InlineKeyboardMarkup(buttons)
+
+            html_text = markdown_to_telegram_html("\n".join(lines))
+            await update.effective_message.reply_text(html_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
     async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not is_authorized_owner(update, owner_id):
             if update.effective_message:
@@ -425,6 +610,17 @@ def create_telegram_app(
         await query.answer()
 
         data = query.data or ""
+        if data == "cancel_all_pending":
+            async with user_lock:
+                cancelled_count = conv_memory.cancel_all_pending(owner_id)
+                msg = f"Cancelled {cancelled_count} pending proposal(s). No filesystem changes were made."
+                try:
+                    await query.edit_message_text(msg)
+                except Exception:
+                    pass
+                conv_memory.add_message(owner_id, "assistant", msg)
+            return
+
         if ":" not in data:
             return
         action, action_id = data.split(":", 1)
@@ -585,6 +781,10 @@ def create_telegram_app(
     app.add_handler(CommandHandler("tasks", tasks_handler))
     app.add_handler(CommandHandler("task", task_handler))
     app.add_handler(CommandHandler(["workflow", "run"], workflow_handler))
+    app.add_handler(CommandHandler("status", status_handler))
+    app.add_handler(CommandHandler("history", history_handler))
+    app.add_handler(CommandHandler("cancel", cancel_handler))
+    app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CallbackQueryHandler(confirmation_callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_error_handler(error_handler)

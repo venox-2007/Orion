@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from orion.integrations.ollama import OllamaClient
 
 from orion.tools.registry import ToolRegistry, default_tool_registry
-from orion.tools.security import resolve_folder_alias, validate_safe_path
+from orion.tools.security import prettify_path, resolve_folder_alias, validate_safe_path
 
 TOOL_ROUTER_SYSTEM_PROMPT = (
     "You are ORION's tool selection router. "
@@ -40,48 +40,92 @@ TOOL_ROUTER_SYSTEM_PROMPT = (
 )
 
 
+def is_representable_text(content: str) -> bool:
+    """Ensure text content contains only readable/printable characters without binary data."""
+    if "\x00" in content:
+        return False
+    unprintable = sum(1 for c in content if ord(c) < 32 and c not in ("\n", "\r", "\t"))
+    return unprintable == 0
+
+
+def format_content_preview(content: str, max_preview_bytes: int = 200) -> str:
+    """Format content preview with clear labeling and byte count."""
+    encoded = content.encode("utf-8")
+    total_bytes = len(encoded)
+
+    if total_bytes <= max_preview_bytes:
+        return f"Content ({total_bytes} bytes):\n```\n{content}\n```"
+
+    truncated_text = encoded[:max_preview_bytes].decode("utf-8", errors="ignore")
+    return (
+        f"Content (preview of first {len(truncated_text.encode('utf-8'))} of {total_bytes} bytes):\n"
+        f"```\n{truncated_text}...\n```\n"
+        f"*(Note: Truncated preview. Full file will contain {total_bytes} bytes.)*"
+    )
+
+
 def format_action_proposal(tool_name: str, args: dict[str, Any]) -> str:
-    """Format an action proposal clearly explaining the pending modification."""
+    """Format an action proposal with complete, understandable details."""
     if tool_name == "create_directory":
+        raw = args.get("path", "")
+        pretty = prettify_path(raw)
+        name = Path(pretty).name or pretty
+        parent = str(Path(pretty).parent).replace("\\", "/")
+        if parent == ".":
+            parent = prettify_path(Path(raw).parent)
         return (
             "⚠️ **Action Confirmation Required**\n\n"
             "ORION proposes creating a new directory:\n"
-            f"• **Directory:** `{args.get('path')}`\n\n"
+            f"• **Action:** Create directory\n"
+            f"• **Folder Name:** `{name}`\n"
+            f"• **Location:** `{parent}`\n\n"
             "*No existing directory will be overwritten. Confirm to proceed.*"
         )
     if tool_name == "create_text_file":
+        raw = args.get("path", "")
+        pretty = prettify_path(raw)
+        name = Path(pretty).name or pretty
+        parent = str(Path(pretty).parent).replace("\\", "/")
+        if parent == ".":
+            parent = prettify_path(Path(raw).parent)
         content = args.get("content", "")
-        preview = content[:200] + ("..." if len(content) > 200 else "")
+        preview_block = format_content_preview(content)
         return (
             "⚠️ **Action Confirmation Required**\n\n"
             "ORION proposes creating a new text file:\n"
-            f"• **File:** `{args.get('path')}`\n"
-            f"• **Size:** {len(content)} characters\n"
-            f"• **Preview:**\n```\n{preview}\n```\n\n"
+            f"• **Action:** Create text file\n"
+            f"• **Filename:** `{name}`\n"
+            f"• **Location:** `{parent}`\n"
+            f"• **{preview_block}**\n\n"
             "*Overwriting existing files is strictly prohibited. Confirm to proceed.*"
         )
-    if tool_name == "copy_file":
+    if tool_name in ("copy_file", "move_file"):
+        action_title = "Copy file" if tool_name == "copy_file" else "Move file"
+        src_pretty = prettify_path(args.get("source", ""))
+        dst_pretty = prettify_path(args.get("destination", ""))
+        src_name = Path(src_pretty).name
+        src_parent = str(Path(src_pretty).parent).replace("\\", "/")
         return (
             "⚠️ **Action Confirmation Required**\n\n"
-            "ORION proposes copying a file:\n"
-            f"• **Source:** `{args.get('source')}`\n"
-            f"• **Destination:** `{args.get('destination')}`\n\n"
-            "*No files will be overwritten. Confirm to proceed.*"
-        )
-    if tool_name == "move_file":
-        return (
-            "⚠️ **Action Confirmation Required**\n\n"
-            "ORION proposes moving a file:\n"
-            f"• **Source:** `{args.get('source')}`\n"
-            f"• **Destination:** `{args.get('destination')}`\n\n"
+            f"ORION proposes {action_title.lower()}ing:\n"
+            f"• **Action:** {action_title}\n"
+            f"• **Filename:** `{src_name}`\n"
+            f"• **Source Location:** `{src_parent}`\n"
+            f"• **Destination:** `{dst_pretty}`\n\n"
             "*No files will be overwritten. Confirm to proceed.*"
         )
     if tool_name == "rename_file":
+        src_pretty = prettify_path(args.get("source", ""))
+        src_name = Path(src_pretty).name
+        src_parent = str(Path(src_pretty).parent).replace("\\", "/")
+        new_name = args.get("new_name", "")
         return (
             "⚠️ **Action Confirmation Required**\n\n"
             "ORION proposes renaming a file:\n"
-            f"• **Source:** `{args.get('source')}`\n"
-            f"• **New Name:** `{args.get('new_name')}`\n\n"
+            f"• **Action:** Rename file\n"
+            f"• **Original File:** `{src_name}`\n"
+            f"• **Location:** `{src_parent}`\n"
+            f"• **New Filename:** `{new_name}`\n\n"
             "*No files will be overwritten. Confirm to proceed.*"
         )
     return "⚠️ **Action Confirmation Required**\nPlease confirm or cancel this operation."
@@ -301,6 +345,8 @@ async def route_and_execute_tool(
                 if not dest.parent.is_dir():
                     return {"handled": True, "reply": "Cannot create directory: Parent directory does not exist."}
             elif tool_name == "create_text_file":
+                if not is_representable_text(clean_args.get("content", "")):
+                    return {"handled": True, "reply": "Cannot proceed: File content contains unprintable or binary characters that cannot be clearly displayed for review."}
                 dest = validate_safe_path(clean_args["path"], must_exist=False)
                 if dest.exists():
                     return {"handled": True, "reply": f"Cannot create file: `{dest.name}` already exists. Overwriting is strictly prohibited."}

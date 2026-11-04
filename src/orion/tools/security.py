@@ -194,3 +194,53 @@ def validate_safe_path(target_path: str | Path, must_exist: bool = True) -> Path
         raise PermissionError(f"Access denied: '{target_path}' is outside permitted directories.")
 
     return resolved
+
+
+def prettify_path(raw_path: str | Path) -> str:
+    """Format an absolute or raw filesystem path using human-readable folder aliases.
+
+    Avoids leaking private Windows usernames and host path trees.
+    Example:
+    C:\\Users\\username\\Downloads\\notes.pdf -> Downloads/notes.pdf
+    C:\\Users\\username\\OneDrive\\Documents\\Notes -> Documents/Notes
+    """
+    if not raw_path:
+        return ""
+
+    # Resolve any natural folder aliases (e.g. 'Downloads/...' -> actual user downloads folder)
+    try:
+        resolved_alias = resolve_folder_alias(str(raw_path))
+        p = Path(resolved_alias)
+    except Exception:
+        p = Path(raw_path)
+
+    try:
+        resolved = p.resolve(strict=False)
+    except Exception:
+        resolved = p
+
+    known = get_known_windows_folders()
+    alias_order = [
+        ("downloads", "Downloads"),
+        ("documents", "Documents"),
+        ("desktop", "Desktop"),
+        ("home", "~"),
+    ]
+
+    for key, display_name in alias_order:
+        base = known.get(key)
+        if base:
+            try:
+                rel = resolved.relative_to(base)
+                rel_str = str(rel).replace("\\", "/")
+                return f"{display_name}/{rel_str}" if rel_str != "." else display_name
+            except ValueError:
+                continue
+
+    clean_str = str(raw_path).replace("\\", "/")
+    home_str = str(known.get("home", "")).replace("\\", "/")
+    if home_str and clean_str.startswith(home_str):
+        return "~" + clean_str[len(home_str):]
+
+    return clean_str
+

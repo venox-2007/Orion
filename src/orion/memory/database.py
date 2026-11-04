@@ -563,3 +563,245 @@ class ConversationMemory:
                 }
             )
         return workflows
+
+    def get_running_workflow(self, user_id: int) -> dict[str, Any] | None:
+        """Retrieve currently running execution workflow for user, if any."""
+        query = """
+            SELECT id, goal, steps_json, status, created_at
+            FROM execution_workflows
+            WHERE user_id = ? AND status = 'running'
+            ORDER BY created_at DESC LIMIT 1
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.execute(query, (user_id,))
+                row = cursor.fetchone()
+        if not row:
+            return None
+        try:
+            steps = json.loads(row[2])
+        except Exception:
+            steps = []
+        return {
+            "id": row[0],
+            "goal": row[1],
+            "steps": steps,
+            "status": row[3],
+            "created_at": row[4],
+        }
+
+    def get_pending_workflows(self, user_id: int) -> list[dict[str, Any]]:
+        """Retrieve all currently active pending execution workflows (cleaning up expired ones)."""
+        now = time.time()
+        query = """
+            SELECT id, goal, steps_json, status, created_at, expires_at
+            FROM execution_workflows
+            WHERE user_id = ? AND status = 'pending'
+            ORDER BY created_at DESC
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.execute(query, (user_id,))
+                rows = cursor.fetchall()
+                active = []
+                for r in rows:
+                    w_id, goal, steps_json, status, created, expires = r
+                    if now > expires:
+                        conn.execute("UPDATE execution_workflows SET status = 'expired' WHERE id = ?", (w_id,))
+                    else:
+                        try:
+                            steps = json.loads(steps_json)
+                        except Exception:
+                            steps = []
+                        active.append({
+                            "id": w_id,
+                            "goal": goal,
+                            "steps": steps,
+                            "status": "pending",
+                            "created_at": created,
+                            "expires_at": expires,
+                        })
+                conn.commit()
+        return active
+
+    def get_pending_single_actions(self, user_id: int) -> list[dict[str, Any]]:
+        """Retrieve all currently active pending single actions."""
+        now = time.time()
+        query = """
+            SELECT id, action_type, payload_json, status, created_at, expires_at
+            FROM pending_actions
+            WHERE user_id = ? AND status = 'pending'
+            ORDER BY created_at DESC
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.execute(query, (user_id,))
+                rows = cursor.fetchall()
+                active = []
+                for r in rows:
+                    a_id, act_type, payload_json, status, created, expires = r
+                    if now > expires:
+                        conn.execute("UPDATE pending_actions SET status = 'expired' WHERE id = ?", (a_id,))
+                    else:
+                        try:
+                            payload = json.loads(payload_json)
+                        except Exception:
+                            payload = {}
+                        active.append({
+                            "id": a_id,
+                            "action_type": act_type,
+                            "payload": payload,
+                            "status": "pending",
+                            "created_at": created,
+                            "expires_at": expires,
+                        })
+                conn.commit()
+        return active
+
+    def cancel_pending_action(self, action_id: str, user_id: int) -> bool:
+        """Atomically cancel a single pending action."""
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.execute(
+                    "UPDATE pending_actions SET status = 'cancelled' WHERE id = ? AND user_id = ? AND status = 'pending'",
+                    (action_id, user_id),
+                )
+                updated = cursor.rowcount > 0
+                conn.commit()
+        return updated
+
+    def cancel_all_pending(self, user_id: int) -> int:
+        """Atomically cancel all pending workflows and single actions for user."""
+        total = 0
+        with self._lock:
+            with self._get_connection() as conn:
+                cur1 = conn.execute(
+                    "UPDATE execution_workflows SET status = 'cancelled' WHERE user_id = ? AND status = 'pending'",
+                    (user_id,),
+                )
+                total += cur1.rowcount
+                cur2 = conn.execute(
+                    "UPDATE pending_actions SET status = 'cancelled' WHERE user_id = ? AND status = 'pending'",
+                    (user_id,),
+                )
+                total += cur2.rowcount
+                conn.commit()
+        return total
+
+    def get_latest_execution_outcome(self, user_id: int) -> dict[str, Any] | None:
+        """Retrieve the most recent finished, failed, cancelled, or interrupted execution outcome."""
+        query_wf = """
+            SELECT id, goal, status, coalesce(completed_at, created_at), steps_json, error_summary
+            FROM execution_workflows
+            WHERE user_id = ? AND status NOT IN ('pending', 'running')
+            ORDER BY coalesce(completed_at, created_at) DESC LIMIT 1
+        """
+        query_act = """
+            SELECT id, action_type, status, strftime('%s', executed_at), payload_json, result_json
+            FROM action_history
+            WHERE user_id = ?
+            ORDER BY executed_at DESC LIMIT 1
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                cur_wf = conn.execute(query_wf, (user_id,))
+                row_wf = cur_wf.fetchone()
+                cur_act = conn.execute(query_act, (user_id,))
+                row_act = cur_act.fetchone()
+
+        if not row_wf and not row_act:
+            return None
+
+        time_wf = float(row_wf[3]) if row_wf and row_wf[3] else 0.0
+        time_act = float(row_act[3]) if row_act and row_act[3] else 0.0
+
+        if time_wf >= time_act and row_wf:
+            try:
+                steps = json.loads(row_wf[4])
+            except Exception:
+                steps = []
+            return {
+                "kind": "workflow",
+                "id": row_wf[0],
+                "summary": row_wf[1],
+                "status": row_wf[2],
+                "timestamp": time_wf,
+                "steps": steps,
+                "error_summary": row_wf[5],
+            }
+        elif row_act:
+            try:
+                payload = json.loads(row_act[4])
+            except Exception:
+                payload = {}
+            act_name = row_act[1].replace("_", " ").title()
+            return {
+                "kind": "action",
+                "id": row_act[0],
+                "summary": act_name,
+                "status": row_act[2],
+                "timestamp": time_act,
+                "payload": payload,
+            }
+        return None
+
+    def get_unified_history(self, user_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        """Retrieve recent execution history (workflows and actions) up to limit."""
+        if limit <= 0:
+            return []
+
+        query_wf = """
+            SELECT id, goal, status, coalesce(completed_at, created_at), steps_json, error_summary
+            FROM execution_workflows
+            WHERE user_id = ?
+            ORDER BY coalesce(completed_at, created_at) DESC LIMIT ?
+        """
+        query_act = """
+            SELECT id, action_type, status, strftime('%s', executed_at), payload_json, result_json
+            FROM action_history
+            WHERE user_id = ?
+            ORDER BY executed_at DESC LIMIT ?
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                cur_wf = conn.execute(query_wf, (user_id, limit))
+                rows_wf = cur_wf.fetchall()
+                cur_act = conn.execute(query_act, (user_id, limit))
+                rows_act = cur_act.fetchall()
+
+        entries = []
+        for r in rows_wf:
+            try:
+                steps = json.loads(r[4])
+            except Exception:
+                steps = []
+            ts = float(r[3]) if r[3] else 0.0
+            comp_count = sum(1 for s in steps if s.get("status") == "completed")
+            fail_count = sum(1 for s in steps if s.get("status") == "failed")
+            entries.append({
+                "kind": "workflow",
+                "id": r[0],
+                "summary": r[1],
+                "status": r[2],
+                "timestamp": ts,
+                "total_steps": len(steps),
+                "completed_steps": comp_count,
+                "failed_steps": fail_count,
+            })
+
+        for r in rows_act:
+            ts = float(r[3]) if r[3] else 0.0
+            act_name = r[1].replace("_", " ").title()
+            entries.append({
+                "kind": "action",
+                "id": r[0],
+                "summary": act_name,
+                "status": r[2],
+                "timestamp": ts,
+                "total_steps": 1,
+                "completed_steps": 1 if r[2] == "success" else 0,
+                "failed_steps": 1 if r[2] == "failed" else 0,
+            })
+
+        entries.sort(key=lambda x: x["timestamp"], reverse=True)
+        return entries[:limit]
