@@ -694,13 +694,13 @@ class ConversationMemory:
             SELECT id, goal, status, coalesce(completed_at, created_at), steps_json, error_summary
             FROM execution_workflows
             WHERE user_id = ? AND status NOT IN ('pending', 'running')
-            ORDER BY coalesce(completed_at, created_at) DESC LIMIT 1
+            ORDER BY coalesce(completed_at, created_at) DESC, id DESC LIMIT 1
         """
         query_act = """
             SELECT id, action_type, status, strftime('%s', executed_at), payload_json, result_json
             FROM action_history
             WHERE user_id = ?
-            ORDER BY executed_at DESC LIMIT 1
+            ORDER BY executed_at DESC, id DESC LIMIT 1
         """
         with self._lock:
             with self._get_connection() as conn:
@@ -715,7 +715,7 @@ class ConversationMemory:
         time_wf = float(row_wf[3]) if row_wf and row_wf[3] else 0.0
         time_act = float(row_act[3]) if row_act and row_act[3] else 0.0
 
-        if time_wf >= time_act and row_wf:
+        if (time_wf, row_wf[0] if row_wf else 0) >= (time_act, row_act[0] if row_act else 0) and row_wf:
             try:
                 steps = json.loads(row_wf[4])
             except Exception:
@@ -734,12 +734,39 @@ class ConversationMemory:
                 payload = json.loads(row_act[4])
             except Exception:
                 payload = {}
-            act_name = row_act[1].replace("_", " ").title()
+            act_type = row_act[1]
+            status_val = row_act[2]
+            if act_type == "launch_application":
+                from orion.tools.app_launcher import get_approved_apps
+
+                app_id = payload.get("app_id", "")
+                app_obj = get_approved_apps().get(app_id)
+                app_disp = (
+                    app_obj.display_name
+                    if app_obj
+                    else (payload.get("display_name") or app_id or "Application")
+                )
+                if status_val == "success":
+                    summary = f"Opened {app_disp}"
+                    status_out = "Launch requested"
+                elif status_val == "cancelled":
+                    summary = app_disp
+                    status_out = "Cancelled"
+                elif status_val == "failed":
+                    summary = app_disp
+                    status_out = "Failed to launch"
+                else:
+                    summary = f"Launch {app_disp}"
+                    status_out = status_val
+            else:
+                summary = act_type.replace("_", " ").title()
+                status_out = status_val
+
             return {
                 "kind": "action",
                 "id": row_act[0],
-                "summary": act_name,
-                "status": row_act[2],
+                "summary": summary,
+                "status": status_out,
                 "timestamp": time_act,
                 "payload": payload,
             }
@@ -754,13 +781,13 @@ class ConversationMemory:
             SELECT id, goal, status, coalesce(completed_at, created_at), steps_json, error_summary
             FROM execution_workflows
             WHERE user_id = ?
-            ORDER BY coalesce(completed_at, created_at) DESC LIMIT ?
+            ORDER BY coalesce(completed_at, created_at) DESC, id DESC LIMIT ?
         """
         query_act = """
             SELECT id, action_type, status, strftime('%s', executed_at), payload_json, result_json
             FROM action_history
             WHERE user_id = ?
-            ORDER BY executed_at DESC LIMIT ?
+            ORDER BY executed_at DESC, id DESC LIMIT ?
         """
         with self._lock:
             with self._get_connection() as conn:
@@ -791,17 +818,49 @@ class ConversationMemory:
 
         for r in rows_act:
             ts = float(r[3]) if r[3] else 0.0
-            act_name = r[1].replace("_", " ").title()
+            act_type = r[1]
+            status_val = r[2]
+            try:
+                payload = json.loads(r[4])
+            except Exception:
+                payload = {}
+
+            if act_type == "launch_application":
+                from orion.tools.app_launcher import get_approved_apps
+
+                app_id = payload.get("app_id", "")
+                app_obj = get_approved_apps().get(app_id)
+                app_disp = (
+                    app_obj.display_name
+                    if app_obj
+                    else (payload.get("display_name") or app_id or "Application")
+                )
+                if status_val == "success":
+                    summary = f"Opened {app_disp}"
+                    status_str = "Launch requested"
+                elif status_val == "cancelled":
+                    summary = app_disp
+                    status_str = "Cancelled"
+                elif status_val == "failed":
+                    summary = app_disp
+                    status_str = "Failed to launch"
+                else:
+                    summary = f"Launch {app_disp}"
+                    status_str = status_val
+            else:
+                summary = act_type.replace("_", " ").title()
+                status_str = status_val
+
             entries.append({
                 "kind": "action",
                 "id": r[0],
-                "summary": act_name,
-                "status": r[2],
+                "summary": summary,
+                "status": status_str,
                 "timestamp": ts,
                 "total_steps": 1,
-                "completed_steps": 1 if r[2] == "success" else 0,
-                "failed_steps": 1 if r[2] == "failed" else 0,
+                "completed_steps": 1 if status_val == "success" else 0,
+                "failed_steps": 1 if status_val == "failed" else 0,
             })
 
-        entries.sort(key=lambda x: x["timestamp"], reverse=True)
+        entries.sort(key=lambda x: (x["timestamp"], str(x.get("id", ""))), reverse=True)
         return entries[:limit]

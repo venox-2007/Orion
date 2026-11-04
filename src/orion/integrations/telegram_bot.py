@@ -23,6 +23,7 @@ from orion.integrations.formatter import (
 )
 from orion.integrations.ollama import OLLAMA_UNAVAILABLE_MESSAGE, OllamaClient
 from orion.memory.database import ConversationMemory
+from orion.tools.app_launcher import get_approved_apps, is_app_available
 from orion.tools.registry import ToolRegistry, default_tool_registry
 from orion.tools.router import format_tool_result, route_and_execute_tool
 
@@ -32,6 +33,7 @@ HELP_MESSAGE = (
     "**ORION Commands:**\n"
     "• `/status` — View current running and pending task status\n"
     "• `/history` — View recent task activity history\n"
+    "• `/apps` — View available approved Windows applications\n"
     "• `/cancel` — Cancel pending execution proposals\n"
     "• `/plan <goal>` — Generate structured action plan\n"
     "• `/tasks` — View recent action plans\n"
@@ -366,6 +368,10 @@ def create_telegram_app(
                 status_str = "Interrupted."
             elif status_raw == "expired":
                 status_str = "Expired without approval."
+            elif status_raw == "launch requested":
+                status_str = "Launch requested."
+            elif status_raw == "failed to launch":
+                status_str = "Failed to launch."
             else:
                 status_str = status_raw.capitalize()
             lines.append(f"**Last task:** {summary} — {status_str}")
@@ -407,6 +413,10 @@ def create_telegram_app(
                 status_str = "Interrupted"
             elif status_raw == "running":
                 status_str = "Running"
+            elif status_raw == "launch requested":
+                status_str = "Launch requested"
+            elif status_raw == "failed to launch":
+                status_str = "Failed to launch"
             else:
                 status_str = status_raw.capitalize()
 
@@ -464,12 +474,25 @@ def create_telegram_app(
                     item = pending_wf[0]
                     conv_memory.cancel_execution_workflow(item["id"])
                     name = item["goal"]
+                    cancel_msg = f"Pending task `{name}` has been cancelled. No filesystem changes were made."
                 else:
                     item = pending_single[0]
                     conv_memory.cancel_pending_action(item["id"], owner_id)
-                    name = item["action_type"].replace("_", " ").title()
-
-                cancel_msg = f"Pending task `{name}` has been cancelled. No filesystem changes were made."
+                    act_type = item["action_type"]
+                    if act_type == "launch_application":
+                        app_id = item["payload"].get("app_id", "")
+                        app_obj = get_approved_apps().get(app_id)
+                        name = app_obj.display_name if app_obj else app_id
+                        conv_memory.log_action_history(
+                            user_id=owner_id,
+                            action_type=act_type,
+                            payload=item["payload"],
+                            status="cancelled",
+                        )
+                        cancel_msg = f"Pending launch of `{name}` has been cancelled. No application was launched."
+                    else:
+                        name = act_type.replace("_", " ").title()
+                        cancel_msg = f"Pending task `{name}` has been cancelled. No filesystem changes were made."
                 conv_memory.add_message(owner_id, "assistant", cancel_msg)
                 await send_formatted_message(update.effective_message, cancel_msg)
                 return
@@ -491,6 +514,49 @@ def create_telegram_app(
 
             html_text = markdown_to_telegram_html("\n".join(lines))
             await update.effective_message.reply_text(html_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+    async def apps_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Display available approved Windows applications grouped by category."""
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if not update.effective_message:
+            return
+
+        approved = get_approved_apps()
+        available_by_cat: dict[str, list[str]] = {}
+        unavailable: list[str] = []
+
+        for app_id, app in approved.items():
+            is_avail, _, _ = is_app_available(app_id)
+            if is_avail:
+                available_by_cat.setdefault(app.category, []).append(app.display_name)
+            else:
+                unavailable.append(app.display_name)
+
+        lines = ["**ORION — Available Applications**"]
+
+        category_order = (
+            "Productivity",
+            "Development & AI",
+            "Browsers & Communication",
+            "Media & Utilities",
+        )
+        for cat in category_order:
+            apps = available_by_cat.get(cat, [])
+            if apps:
+                lines.append(f"\n**{cat}:**")
+                for name in apps:
+                    lines.append(f"• {name}")
+
+        if unavailable:
+            lines.append("\n**Unavailable:**")
+            for name in unavailable:
+                lines.append(f"• {name}")
+
+        await send_formatted_message(update.effective_message, "\n".join(lines))
 
     async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not is_authorized_owner(update, owner_id):
@@ -705,7 +771,10 @@ def create_telegram_app(
                             payload=act["payload"],
                             status="cancelled",
                         )
-                    cancel_msg = "❌ Operation cancelled. No filesystem changes were made."
+                    if act and act.get("action_type") == "launch_application":
+                        cancel_msg = "❌ Operation cancelled. No application was launched."
+                    else:
+                        cancel_msg = "❌ Operation cancelled. No filesystem changes were made."
                     html_cancel = markdown_to_telegram_html(cancel_msg)
                     try:
                         await query.edit_message_text(html_cancel, parse_mode=ParseMode.HTML)
@@ -743,7 +812,29 @@ def create_telegram_app(
                     await query.edit_message_text("This action was already processed.")
                     return
 
-                # Re-validate permissions and filesystem state immediately prior to execution
+                # Re-validate permissions, filesystem state, or application availability prior to execution
+                if act["action_type"] == "launch_application":
+                    app_id = act["payload"].get("app_id", "")
+                    is_avail, avail_err, _ = is_app_available(app_id)
+                    if not is_avail:
+                        app_obj = get_approved_apps().get(app_id)
+                        name = app_obj.display_name if app_obj else app_id
+                        fail_msg = f"{name} — Failed to launch: Application is not currently installed or available."
+                        conv_memory.log_action_history(
+                            user_id=owner_id,
+                            action_type=act["action_type"],
+                            payload=act["payload"],
+                            status="failed",
+                            result={"success": False, "error": avail_err},
+                        )
+                        html_fail = markdown_to_telegram_html(fail_msg)
+                        try:
+                            await query.edit_message_text(html_fail, parse_mode=ParseMode.HTML)
+                        except Exception:
+                            await query.edit_message_text(clean_markdown_to_plain(fail_msg))
+                        conv_memory.add_message(owner_id, "assistant", fail_msg)
+                        return
+
                 exec_result = reg.execute(act["action_type"], act["payload"])
                 status_str = "success" if exec_result.get("success") else "failed"
 
@@ -784,6 +875,7 @@ def create_telegram_app(
     app.add_handler(CommandHandler("status", status_handler))
     app.add_handler(CommandHandler("history", history_handler))
     app.add_handler(CommandHandler("cancel", cancel_handler))
+    app.add_handler(CommandHandler("apps", apps_handler))
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CallbackQueryHandler(confirmation_callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))

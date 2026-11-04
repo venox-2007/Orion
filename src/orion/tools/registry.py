@@ -4,6 +4,7 @@ import logging
 from typing import Any, Callable
 from pydantic import BaseModel, Field, ValidationError
 
+from orion.tools.app_launcher import launch_application
 from orion.tools.filesystem import find_files, get_file_info, list_files
 from orion.tools.filesystem_actions import (
     copy_file,
@@ -72,6 +73,12 @@ class CreateTextFileArgs(BaseModel):
 
     path: str = Field(min_length=1, max_length=500, description="Path of new text file to create")
     content: str = Field(default="", max_length=100000, description="Text content to write")
+
+
+class LaunchApplicationArgs(BaseModel):
+    """Schema for launching an approved application."""
+
+    app_id: str = Field(min_length=1, max_length=50, description="Approved application ID")
 
 
 class ToolDefinition:
@@ -171,6 +178,13 @@ class ToolRegistry:
             description="Create a new text file with specified content without overwriting.",
             args_schema=CreateTextFileArgs,
             func=create_text_file,
+            is_write_action=True,
+        )
+        self.register(
+            name="launch_application",
+            description="Launch an approved Windows application on the owner's laptop. Requires user confirmation.",
+            args_schema=LaunchApplicationArgs,
+            func=launch_application,
             is_write_action=True,
         )
 

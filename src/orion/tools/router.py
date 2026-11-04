@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 if TYPE_CHECKING:
     from orion.integrations.ollama import OllamaClient
 
+from orion.tools.app_launcher import (
+    get_approved_apps,
+    is_app_available,
+    is_app_blocked,
+    resolve_app_alias,
+)
 from orion.tools.registry import ToolRegistry, default_tool_registry
 from orion.tools.security import prettify_path, resolve_folder_alias, validate_safe_path
 
@@ -27,13 +34,16 @@ TOOL_ROUTER_SYSTEM_PROMPT = (
     '- move_file: Move a file to another location. Arguments: {"source": "<alias_or_path>", "destination": "<alias_or_path>"}\n'
     '- rename_file: Rename a file in place. Arguments: {"source": "<alias_or_path>", "new_name": "<new_filename_only>"}\n'
     '- create_text_file: Create a new text file. Arguments: {"path": "<alias_or_path>", "content": "<text_content>"}\n\n'
+    "Available controlled application launcher tool (requires explicit user confirmation):\n"
+    '- launch_application: Launch an approved Windows application. Arguments: {"app_id": "<app_id>"}\n'
+    "Approved app_ids: word, excel, powerpoint, notepad, calculator, sticky_notes, file_explorer, vscode, antigravity_ide, chatgpt, claude, edge, comet, whatsapp, teams, zoom, vlc, paint, snipping_tool, winrar.\n\n"
     "Rules for directory and file paths:\n"
     "- For standard folders, use folder aliases: 'Downloads', 'Documents', or 'Desktop' (e.g. {'directory': 'Downloads'}).\n"
     "- Never invent usernames or placeholder paths like 'C:\\\\Users\\\\[username]\\\\' or '%USERPROFILE%'.\n"
     "- For new_name in rename_file, provide ONLY the filename (e.g. 'notes_backup.txt'), never a path.\n\n"
     "Routing Rules:\n"
     '1. If the user asks a general conversation question, return: {"tool": null}\n'
-    '2. If the user asks for unsupported actions (e.g., deleting/removing files, overwriting existing files, running shell/scripts/code, launching apps, browser automation), return: {"tool": null, "unsupported": true}\n'
+    '2. If the user asks for unsupported actions (e.g., deleting/removing files, overwriting existing files, running shell/scripts/code, launching unapproved apps, browser automation), return: {"tool": null, "unsupported": true}\n'
     '3. If the user asks for a single tool above, return: {"tool": "<tool_name>", "arguments": {...}}\n'
     '4. If the user asks for a multi-step workflow (2 or 3 file operations), return: {"is_workflow": true, "steps": [{"step_id": 1, "tool": "<name>", "arguments": {...}, "description": "..."}, ...]}\n'
     "5. Return strict JSON only. Never exceed 3 steps. Do not invent tools."
@@ -128,6 +138,15 @@ def format_action_proposal(tool_name: str, args: dict[str, Any]) -> str:
             f"• **New Filename:** `{new_name}`\n\n"
             "*No files will be overwritten. Confirm to proceed.*"
         )
+    if tool_name == "launch_application":
+        app_id = args.get("app_id", "")
+        app_obj = get_approved_apps().get(app_id)
+        display_name = app_obj.display_name if app_obj else app_id
+        return (
+            "⚠️ **Action Confirmation Required**\n\n"
+            f"Launch **{display_name}** on your laptop?\n\n"
+            "*Confirm to launch the application.*"
+        )
     return "⚠️ **Action Confirmation Required**\nPlease confirm or cancel this operation."
 
 
@@ -152,6 +171,8 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
             return "Cannot proceed: Only regular files can be processed."
         if "exceeds maximum" in lower_err:
             return "Cannot proceed: File content exceeds the maximum allowed size limit (1 MB)."
+        if "application unavailable" in lower_err:
+            return error_msg
         return f"Unable to complete request: {error_msg}"
 
     data = result.get("data", {})
@@ -228,7 +249,80 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
     if tool_name == "rename_file":
         return f"Successfully renamed `{data.get('old_name')}` to `{data.get('new_name')}`."
 
+    if tool_name == "launch_application":
+        disp = data.get("display_name", "Application")
+        return f"🚀 Launch requested for **{disp}**."
+
     return "Action completed successfully."
+
+
+def check_deterministic_app_launch(clean_text: str) -> dict[str, Any] | None:
+    """Deterministically check if text is an imperative app launch or blocked app command.
+
+    Avoids false positives in ordinary conversation while providing instant, reliable
+    routing for approved launch commands and instant rejection for blocked apps.
+    """
+    clean = clean_text.strip()
+    match = re.match(
+        r"^(?:(?:hey\s+|hi\s+)?orion[,\s]+)?(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?(open|launch|start|run)\s+(.+)$",
+        clean,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    raw_target = match.group(2).strip()
+    raw_target = re.sub(
+        r"(?i)\s+(?:on\s+my\s+laptop|on\s+my\s+pc|on\s+my\s+computer|on\s+windows|app|application|program)[\.!\?]?$",
+        "",
+        raw_target,
+    )
+    raw_target = raw_target.strip(" .!?\"'")
+
+    if not raw_target:
+        return {
+            "handled": True,
+            "reply": "Which application would you like to launch? Send `/apps` to view the list of approved applications.",
+        }
+
+    # 1. Check if known blocked application
+    blocked, reason = is_app_blocked(raw_target)
+    if blocked:
+        return {
+            "handled": True,
+            "reply": f"Application '{raw_target}' is not in the approved application allowlist. {reason}",
+        }
+
+    # 2. Check if approved application alias
+    app_id = resolve_app_alias(raw_target)
+    if app_id:
+        app = get_approved_apps()[app_id]
+        is_avail, avail_msg, _ = is_app_available(app_id)
+        if not is_avail:
+            return {
+                "handled": True,
+                "reply": f"Cannot launch {app.display_name}: Application is not currently installed or available on this system.",
+            }
+
+        clean_args = {"app_id": app_id}
+        proposal_text = format_action_proposal("launch_application", clean_args)
+        return {
+            "handled": True,
+            "is_proposal": True,
+            "action_type": "launch_application",
+            "arguments": clean_args,
+            "proposal_text": proposal_text,
+        }
+
+    # 3. If query looks like an unapproved app launch attempt
+    words = raw_target.split()
+    if len(words) <= 4 and re.match(r"^[a-zA-Z0-9_\-\.\s]+$", raw_target):
+        return {
+            "handled": True,
+            "reply": f"Application '{raw_target}' is not in the approved application allowlist. ORION only has permission to launch 20 explicitly sanctioned applications. Send `/apps` to see the full list.",
+        }
+
+    return None
 
 
 async def route_and_execute_tool(
@@ -245,6 +339,11 @@ async def route_and_execute_tool(
     clean_text = user_text.strip()
     if not clean_text:
         return None
+
+    # Deterministic app launch detection before model routing
+    launch_res = check_deterministic_app_launch(clean_text)
+    if launch_res:
+        return launch_res
 
     if ollama_client is None:
         from orion.integrations.ollama import OllamaClient
@@ -374,6 +473,20 @@ async def route_and_execute_tool(
                 dest = validate_safe_path(src.parent / new_name, must_exist=False)
                 if dest.exists():
                     return {"handled": True, "reply": f"Cannot rename: Destination `{dest.name}` already exists. Overwriting is strictly prohibited."}
+            elif tool_name == "launch_application":
+                raw_id = clean_args.get("app_id", "")
+                resolved_id = resolve_app_alias(raw_id)
+                if not resolved_id:
+                    blocked, reason = is_app_blocked(raw_id)
+                    if blocked:
+                        return {"handled": True, "reply": f"Application '{raw_id}' is not in the approved application allowlist. {reason}"}
+                    return {"handled": True, "reply": f"Application '{raw_id}' is not in the approved application allowlist. Use /apps to see approved applications."}
+                clean_args["app_id"] = resolved_id
+                is_avail, avail_msg, _ = is_app_available(resolved_id)
+                if not is_avail:
+                    app_obj = get_approved_apps().get(resolved_id)
+                    disp = app_obj.display_name if app_obj else resolved_id
+                    return {"handled": True, "reply": f"Cannot launch {disp}: Application is not currently installed or available on this system."}
         except (PermissionError, FileNotFoundError, NotADirectoryError, ValueError) as err:
             return {"handled": True, "reply": str(err)}
 
