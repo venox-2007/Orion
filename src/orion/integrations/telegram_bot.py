@@ -33,6 +33,8 @@ HELP_MESSAGE = (
     "**ORION Commands:**\n"
     "• `/status` — View current running and pending task status\n"
     "• `/history` — View recent task activity history\n"
+    "• `/windows` — View open approved application windows\n"
+    "• `/active` — View currently active approved application\n"
     "• `/apps` — View available approved Windows applications\n"
     "• `/cancel` — Cancel pending execution proposals\n"
     "• `/plan <goal>` — Generate structured action plan\n"
@@ -558,6 +560,34 @@ def create_telegram_app(
 
         await send_formatted_message(update.effective_message, "\n".join(lines))
 
+    async def windows_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Display approved applications that currently have open desktop windows."""
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if not update.effective_message:
+            return
+
+        res = reg.execute("list_open_windows", {})
+        reply_msg = format_tool_result("list_open_windows", res)
+        await send_formatted_message(update.effective_message, reply_msg)
+
+    async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Display the currently active foreground approved application."""
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if not update.effective_message:
+            return
+
+        res = reg.execute("get_active_window", {})
+        reply_msg = format_tool_result("get_active_window", res)
+        await send_formatted_message(update.effective_message, reply_msg)
+
     async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not is_authorized_owner(update, owner_id):
             if update.effective_message:
@@ -876,6 +906,8 @@ def create_telegram_app(
     app.add_handler(CommandHandler("history", history_handler))
     app.add_handler(CommandHandler("cancel", cancel_handler))
     app.add_handler(CommandHandler("apps", apps_handler))
+    app.add_handler(CommandHandler("windows", windows_handler))
+    app.add_handler(CommandHandler("active", active_handler))
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CallbackQueryHandler(confirmation_callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))

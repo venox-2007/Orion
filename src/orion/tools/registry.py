@@ -5,6 +5,11 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field, ValidationError
 
 from orion.tools.app_launcher import launch_application
+from orion.tools.desktop_inspector import (
+    get_active_window,
+    get_application_window_status,
+    list_open_windows,
+)
 from orion.tools.filesystem import find_files, get_file_info, list_files
 from orion.tools.filesystem_actions import (
     copy_file,
@@ -81,6 +86,12 @@ class LaunchApplicationArgs(BaseModel):
     app_id: str = Field(min_length=1, max_length=50, description="Approved application ID")
 
 
+class AppWindowStatusArgs(BaseModel):
+    """Schema for inspecting window status of an approved application."""
+
+    app_id: str = Field(min_length=1, max_length=50, description="Approved application ID or friendly name")
+
+
 class ToolDefinition:
     """Registered tool container."""
 
@@ -141,6 +152,27 @@ class ToolRegistry:
             description="Retrieve metadata (size, modified time, directory status) for an approved file.",
             args_schema=GetFileInfoArgs,
             func=get_file_info,
+            is_write_action=False,
+        )
+        self.register(
+            name="list_open_windows",
+            description="List approved applications that currently have open desktop windows.",
+            args_schema=EmptyArgs,
+            func=list_open_windows,
+            is_write_action=False,
+        )
+        self.register(
+            name="get_active_window",
+            description="Identify which approved application is currently active in the foreground.",
+            args_schema=EmptyArgs,
+            func=get_active_window,
+            is_write_action=False,
+        )
+        self.register(
+            name="get_application_window_status",
+            description="Check window count, state (Normal/Minimized/Maximized), and active status for an approved application.",
+            args_schema=AppWindowStatusArgs,
+            func=get_application_window_status,
             is_write_action=False,
         )
 

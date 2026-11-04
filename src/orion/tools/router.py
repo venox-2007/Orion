@@ -27,7 +27,10 @@ TOOL_ROUTER_SYSTEM_PROMPT = (
     "- get_system_resources: Get CPU, RAM, and disk utilization. No arguments.\n"
     '- list_files: List files in an approved directory. Arguments: {"directory": "<alias_or_path>"}\n'
     '- find_files: Search files by filename in an approved directory. Arguments: {"query": "<name>", "directory": "<alias_or_path>"}\n'
-    '- get_file_info: Get metadata of an approved file. Arguments: {"path": "<alias_or_path>"}\n\n'
+    '- get_file_info: Get metadata of an approved file. Arguments: {"path": "<alias_or_path>"}\n'
+    "- list_open_windows: List approved applications that currently have open desktop windows. No arguments.\n"
+    "- get_active_window: Check which approved application is currently active in the foreground. No arguments.\n"
+    '- get_application_window_status: Check window count, state (Normal/Minimized/Maximized), and active status for an approved app. Arguments: {"app_id": "<app_id>"}\n\n'
     "Available controlled file modification tools (require explicit user confirmation):\n"
     '- create_directory: Create a new directory. Arguments: {"path": "<alias_or_path>"}\n'
     '- copy_file: Copy a file to another location. Arguments: {"source": "<alias_or_path>", "destination": "<alias_or_path>"}\n'
@@ -253,7 +256,94 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
         disp = data.get("display_name", "Application")
         return f"🚀 Launch requested for **{disp}**."
 
+    if tool_name == "list_open_windows":
+        windows = data.get("open_windows", [])
+        if not windows:
+            return "No approved applications currently have open windows."
+        lines = ["**ORION — Open Application Windows**\n"]
+        for w in windows:
+            counts: dict[str, int] = {}
+            for s in w.get("states", []):
+                counts[s] = counts.get(s, 0) + 1
+            state_str = ", ".join(f"{cnt} {st}" for st, cnt in counts.items())
+            active_tag = " [Active]" if w.get("is_active") else ""
+            lines.append(f"• **{w.get('display_name')}:** {w.get('window_count')} window(s) ({state_str}){active_tag}")
+        lines.append("\n*Only approved applications are monitored.*")
+        return "\n".join(lines)
+
+    if tool_name == "get_active_window":
+        if data.get("has_active_approved_window"):
+            return f"**Active Application:** **{data.get('display_name')}** ({data.get('state')})"
+        return data.get("message", "The active application is not available to ORION.")
+
+    if tool_name == "get_application_window_status":
+        return data.get("message", "Window status retrieved.")
+
     return "Action completed successfully."
+
+
+def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
+    """Deterministically check if text is asking about desktop windows or active app."""
+    clean = clean_text.strip().lower()
+    clean_no_punct = re.sub(r"[^\w\s]", "", clean).strip()
+
+    # 1. Open windows query
+    open_win_patterns = (
+        "what apps are open",
+        "what applications are open",
+        "which apps are open",
+        "which applications are open",
+        "what windows are open",
+        "show open windows",
+        "list open windows",
+        "open windows",
+        "what is open",
+        "what apps are running",
+        "which apps are running",
+    )
+    if any(p in clean_no_punct for p in open_win_patterns):
+        return {"tool": "list_open_windows", "arguments": {}}
+
+    # 2. Active window query
+    active_win_patterns = (
+        "which application is active",
+        "what application is active",
+        "which app is active",
+        "what app is active",
+        "who is active",
+        "what is the active window",
+        "what is active",
+        "current active application",
+        "current active window",
+        "active window",
+        "active app",
+    )
+    if any(p in clean_no_punct for p in active_win_patterns):
+        return {"tool": "get_active_window", "arguments": {}}
+
+    # 3. Status for specific application:
+    # "is vs code open", "is whatsapp minimized", "how many excel windows are open", "is word open"
+    match_status = re.search(
+        r"(?:is|how\s+many)\s+(?:window(?:s)?\s+(?:of|for)\s+)?([a-zA-Z0-9_\s]+?)\s+(?:windows?\s+)?(?:are\s+|is\s+)?(?:open|running|minimized|maximized|active)",
+        clean,
+    )
+    if match_status:
+        candidate_app = match_status.group(1).strip()
+        candidate_app = re.sub(r"^(?:the\s+|my\s+)", "", candidate_app)
+        candidate_app = re.sub(r"\s+(?:window|windows|app|application)$", "", candidate_app).strip()
+
+        blocked, reason = is_app_blocked(candidate_app)
+        if blocked:
+            return {
+                "handled": True,
+                "reply": f"Application '{candidate_app}' is not in the approved application allowlist. {reason}",
+            }
+
+        app_id = resolve_app_alias(candidate_app)
+        if app_id:
+            return {"tool": "get_application_window_status", "arguments": {"app_id": app_id}}
+
+    return None
 
 
 def check_deterministic_app_launch(clean_text: str) -> dict[str, Any] | None:
@@ -340,7 +430,20 @@ async def route_and_execute_tool(
     if not clean_text:
         return None
 
-    # Deterministic app launch detection before model routing
+    reg = registry or default_tool_registry
+
+    # 1. Deterministic window and desktop query detection
+    win_query = check_deterministic_window_query(clean_text)
+    if win_query:
+        if win_query.get("handled"):
+            return win_query
+        tool_name = win_query["tool"]
+        tool_args = win_query.get("arguments", {})
+        exec_res = reg.execute(tool_name, tool_args)
+        reply = format_tool_result(tool_name, exec_res)
+        return {"handled": True, "tool": tool_name, "result": exec_res, "reply": reply}
+
+    # 2. Deterministic app launch detection before model routing
     launch_res = check_deterministic_app_launch(clean_text)
     if launch_res:
         return launch_res
@@ -351,7 +454,6 @@ async def route_and_execute_tool(
         ollama = OllamaClient()
     else:
         ollama = ollama_client
-    reg = registry or default_tool_registry
 
     messages = [
         {"role": "system", "content": TOOL_ROUTER_SYSTEM_PROMPT},
@@ -501,6 +603,16 @@ async def route_and_execute_tool(
         }
 
     # Execute read-only tool
+    if tool_name == "get_application_window_status":
+        raw_id = clean_args.get("app_id", "")
+        resolved = resolve_app_alias(raw_id)
+        if not resolved:
+            return {
+                "handled": True,
+                "reply": f"Application '{raw_id}' is not in the approved application allowlist.",
+            }
+        clean_args["app_id"] = resolved
+
     exec_result = reg.execute(tool_name, clean_args)
     reply_msg = format_tool_result(tool_name, exec_result)
 
