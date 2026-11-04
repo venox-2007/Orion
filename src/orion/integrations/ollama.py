@@ -51,6 +51,9 @@ class OllamaClient:
                 {"role": "user", "content": user_message},
             ],
             "stream": False,
+            "think": False,
+            "keep_alive": "30m",
+            "options": {"num_predict": 256},
         }
 
         url = f"{self.base_url}/api/chat"

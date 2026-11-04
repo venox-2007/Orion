@@ -79,7 +79,7 @@ def test_settings_validation() -> None:
 
 @pytest.mark.asyncio
 async def test_ollama_client_success() -> None:
-    """Test successful Ollama response extraction with mocked httpx client."""
+    """Test successful Ollama response extraction with mocked httpx client and latency options."""
     client = OllamaClient(base_url="http://127.0.0.1:11434", model="qwen3.5:4b")
 
     mock_resp = MagicMock()
@@ -92,6 +92,13 @@ async def test_ollama_client_success() -> None:
         mock_post.return_value = mock_resp
         result = await client.generate_response("Hi")
         assert result == "Hello from ORION!"
+
+        # Verify performance hotfix payload options
+        called_args, called_kwargs = mock_post.call_args
+        payload = called_kwargs.get("json", {})
+        assert payload.get("think") is False
+        assert payload.get("keep_alive") == "30m"
+        assert payload.get("options") == {"num_predict": 256}
 
 
 @pytest.mark.asyncio
