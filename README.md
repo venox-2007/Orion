@@ -11,6 +11,8 @@ ORION is designed from the ground up to operate locally, respecting user privacy
 - **FastAPI Core**: Minimal, fast local backend with health monitoring (`GET /health`).
 - **Local Ollama Integration**: Communicates with the local Ollama instance (`http://127.0.0.1:11434`) using the `qwen3.5:4b` model with automatic reasoning tag (`<think>`) stripping.
 - **Persistent Conversation Memory**: Local SQLite storage preserving conversation context and message history across process restarts with configurable turn budgets and a `/reset` command.
+- **Task Planning Core**: Structured action planning module generating persistent ordered plans (up to 8 steps).
+- **Safe Read-Only Windows Tools**: Sandboxed read-only tools for system inspection (battery, CPU, RAM, disk) and safe directory listing/searching restricted strictly to pre-configured allowed folders.
 - **Telegram Bot**: Long-polling interface via `python-telegram-bot` restricting access strictly to the authenticated owner in private chats.
 - **Environment-based Configuration**: Managed via Pydantic settings without committed credentials.
 
@@ -55,6 +57,7 @@ ORION is designed from the ground up to operate locally, respecting user privacy
    Open `.env` and configure:
    - `ORION_TELEGRAM_BOT_TOKEN`: Your bot token obtained from [@BotFather](https://t.me/BotFather).
    - `ORION_TELEGRAM_OWNER_ID`: Your numeric Telegram user ID (safely obtained from [@userinfobot](https://t.me/userinfobot)).
+   - `ORION_ALLOWED_DIRECTORIES`: Optional comma-separated absolute paths permitted for read-only listing/searching (e.g. `C:\Users\Username\Documents,C:\Users\Username\Downloads`). Defaults to empty (filesystem access disabled).
 
 ### Running ORION
 

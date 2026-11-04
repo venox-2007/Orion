@@ -22,6 +22,8 @@ from orion.integrations.formatter import (
 )
 from orion.integrations.ollama import OLLAMA_UNAVAILABLE_MESSAGE, OllamaClient
 from orion.memory.database import ConversationMemory
+from orion.tools.registry import ToolRegistry, default_tool_registry
+from orion.tools.router import route_and_execute_tool
 
 UNAUTHORIZED_MESSAGE = "Access restricted: unauthorized user or chat."
 WELCOME_MESSAGE = "Hello! I am ORION, your personal AI assistant. How can I help you today?"
@@ -80,10 +82,12 @@ def create_telegram_app(
     owner_id: int,
     ollama_client: OllamaClient | None = None,
     memory: ConversationMemory | None = None,
+    tool_registry: ToolRegistry | None = None,
 ) -> Application:
     """Build and configure the Telegram application with handlers."""
     client = ollama_client or OllamaClient()
     conv_memory = memory or ConversationMemory()
+    reg = tool_registry or default_tool_registry
     settings = get_settings()
     user_lock = asyncio.Lock()
 
@@ -242,15 +246,23 @@ def create_telegram_app(
             )
 
         async with user_lock:
-            history = conv_memory.get_recent_messages(
-                user_id=owner_id,
-                limit=settings.max_history_messages,
-            )
-            reply_text = await client.generate_response(user_text, history=history)
-
-            if reply_text != OLLAMA_UNAVAILABLE_MESSAGE:
+            # 1. Attempt natural-language tool routing first
+            tool_res = await route_and_execute_tool(user_text, ollama_client=client, registry=reg)
+            if tool_res and tool_res.get("handled"):
+                reply_text = tool_res.get("reply", "")
                 conv_memory.add_message(owner_id, "user", user_text)
                 conv_memory.add_message(owner_id, "assistant", reply_text)
+            else:
+                # 2. Standard conversational flow with persistent memory
+                history = conv_memory.get_recent_messages(
+                    user_id=owner_id,
+                    limit=settings.max_history_messages,
+                )
+                reply_text = await client.generate_response(user_text, history=history)
+
+                if reply_text != OLLAMA_UNAVAILABLE_MESSAGE:
+                    conv_memory.add_message(owner_id, "user", user_text)
+                    conv_memory.add_message(owner_id, "assistant", reply_text)
 
         await send_formatted_message(update.effective_message, reply_text)
 

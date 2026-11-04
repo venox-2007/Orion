@@ -117,6 +117,7 @@ async def test_telegram_handlers(tmp_path) -> None:
     """Test Telegram start and message handlers with mocked updates."""
     mock_ollama = MagicMock()
     mock_ollama.generate_response = AsyncMock(return_value="Here is the answer.")
+    mock_ollama.generate_structured_json = AsyncMock(return_value=None)
 
     owner_id = 55555
     token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"

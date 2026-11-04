@@ -1,6 +1,7 @@
 """Application settings and environment configuration."""
 
 from functools import lru_cache
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +28,20 @@ class Settings(BaseSettings):
     database_path: str = "data/orion.db"
     max_history_messages: int = 10
     max_goal_length: int = 500
+
+    # Tool & security configuration
+    allowed_directories: str = ""
+
+    def get_allowed_directories(self) -> list[Path]:
+        """Return list of canonical resolved allowed directory paths."""
+        if not self.allowed_directories or not self.allowed_directories.strip():
+            return []
+        dirs: list[Path] = []
+        for part in self.allowed_directories.split(","):
+            clean = part.strip()
+            if clean:
+                dirs.append(Path(clean).resolve())
+        return dirs
 
     model_config = SettingsConfigDict(
         env_prefix="ORION_",
