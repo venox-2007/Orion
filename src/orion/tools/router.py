@@ -1,28 +1,89 @@
 """Natural-language tool routing and presentation layer."""
 
-from typing import Any
-from orion.integrations.ollama import OllamaClient
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from pydantic import ValidationError
+
+if TYPE_CHECKING:
+    from orion.integrations.ollama import OllamaClient
+
 from orion.tools.registry import ToolRegistry, default_tool_registry
+from orion.tools.security import resolve_folder_alias, validate_safe_path
 
 TOOL_ROUTER_SYSTEM_PROMPT = (
     "You are ORION's tool selection router. "
-    "Analyze the user's message and determine if it requires a read-only Windows tool.\n"
-    "Available tools:\n"
+    "Analyze the user's message and determine if it requires a sanctioned Windows tool.\n\n"
+    "Available read-only tools:\n"
     "- get_battery_status: Get battery percentage and charging status. No arguments.\n"
     "- get_system_resources: Get CPU, RAM, and disk utilization. No arguments.\n"
     '- list_files: List files in an approved directory. Arguments: {"directory": "<alias_or_path>"}\n'
     '- find_files: Search files by filename in an approved directory. Arguments: {"query": "<name>", "directory": "<alias_or_path>"}\n'
     '- get_file_info: Get metadata of an approved file. Arguments: {"path": "<alias_or_path>"}\n\n'
+    "Available controlled file modification tools (require explicit user confirmation):\n"
+    '- create_directory: Create a new directory. Arguments: {"path": "<alias_or_path>"}\n'
+    '- copy_file: Copy a file to another location. Arguments: {"source": "<alias_or_path>", "destination": "<alias_or_path>"}\n'
+    '- move_file: Move a file to another location. Arguments: {"source": "<alias_or_path>", "destination": "<alias_or_path>"}\n'
+    '- rename_file: Rename a file in place. Arguments: {"source": "<alias_or_path>", "new_name": "<new_filename_only>"}\n'
+    '- create_text_file: Create a new text file. Arguments: {"path": "<alias_or_path>", "content": "<text_content>"}\n\n'
     "Rules for directory and file paths:\n"
     "- For standard folders, use folder aliases: 'Downloads', 'Documents', or 'Desktop' (e.g. {'directory': 'Downloads'}).\n"
     "- Never invent usernames or placeholder paths like 'C:\\\\Users\\\\[username]\\\\' or '%USERPROFILE%'.\n"
-    "- If the user names a folder (e.g. 'Downloads'), supply that alias name directly.\n\n"
+    "- For new_name in rename_file, provide ONLY the filename (e.g. 'notes_backup.txt'), never a path.\n\n"
     "Routing Rules:\n"
     '1. If the user asks a general conversation question, return: {"tool": null}\n'
-    '2. If the user asks for unsupported actions (e.g., launching apps, modifying files, executing code, browser tools), return: {"tool": null, "unsupported": true}\n'
-    '3. If the user asks for one of the 5 tools above, return: {"tool": "<tool_name>", "arguments": {...}}\n'
-    "4. Return strict JSON only. Do not invent tools."
+    '2. If the user asks for unsupported actions (e.g., deleting/removing files, overwriting existing files, running shell/scripts/code, launching apps, browser automation), return: {"tool": null, "unsupported": true}\n'
+    '3. If the user asks for one of the sanctioned tools above, return: {"tool": "<tool_name>", "arguments": {...}}\n'
+    "4. Return strict JSON only. Select at most one tool per request. Do not invent tools."
 )
+
+
+def format_action_proposal(tool_name: str, args: dict[str, Any]) -> str:
+    """Format an action proposal clearly explaining the pending modification."""
+    if tool_name == "create_directory":
+        return (
+            "⚠️ **Action Confirmation Required**\n\n"
+            "ORION proposes creating a new directory:\n"
+            f"• **Directory:** `{args.get('path')}`\n\n"
+            "*No existing directory will be overwritten. Confirm to proceed.*"
+        )
+    if tool_name == "create_text_file":
+        content = args.get("content", "")
+        preview = content[:200] + ("..." if len(content) > 200 else "")
+        return (
+            "⚠️ **Action Confirmation Required**\n\n"
+            "ORION proposes creating a new text file:\n"
+            f"• **File:** `{args.get('path')}`\n"
+            f"• **Size:** {len(content)} characters\n"
+            f"• **Preview:**\n```\n{preview}\n```\n\n"
+            "*Overwriting existing files is strictly prohibited. Confirm to proceed.*"
+        )
+    if tool_name == "copy_file":
+        return (
+            "⚠️ **Action Confirmation Required**\n\n"
+            "ORION proposes copying a file:\n"
+            f"• **Source:** `{args.get('source')}`\n"
+            f"• **Destination:** `{args.get('destination')}`\n\n"
+            "*No files will be overwritten. Confirm to proceed.*"
+        )
+    if tool_name == "move_file":
+        return (
+            "⚠️ **Action Confirmation Required**\n\n"
+            "ORION proposes moving a file:\n"
+            f"• **Source:** `{args.get('source')}`\n"
+            f"• **Destination:** `{args.get('destination')}`\n\n"
+            "*No files will be overwritten. Confirm to proceed.*"
+        )
+    if tool_name == "rename_file":
+        return (
+            "⚠️ **Action Confirmation Required**\n\n"
+            "ORION proposes renaming a file:\n"
+            f"• **Source:** `{args.get('source')}`\n"
+            f"• **New Name:** `{args.get('new_name')}`\n\n"
+            "*No files will be overwritten. Confirm to proceed.*"
+        )
+    return "⚠️ **Action Confirmation Required**\nPlease confirm or cancel this operation."
 
 
 def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
@@ -30,6 +91,8 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
     if not result.get("success"):
         error_msg = result.get("error", "Unknown error")
         lower_err = error_msg.lower()
+        if "already exists" in lower_err:
+            return "Cannot proceed: The destination file or directory already exists. Overwriting is strictly prohibited."
         if "outside permitted" in lower_err or "access denied" in lower_err:
             return "Access denied: That directory or file is outside your permitted folders. You can authorize folders in ORION_ALLOWED_DIRECTORIES."
         if "disabled" in lower_err:
@@ -38,6 +101,12 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
             return "The requested file or directory was not found."
         if "placeholder" in lower_err or "unpermitted" in lower_err:
             return "Invalid folder path or unrecognized placeholder."
+        if "symlinks" in lower_err:
+            return "Cannot proceed: Symlinks and junctions are not permitted."
+        if "regular file" in lower_err:
+            return "Cannot proceed: Only regular files can be processed."
+        if "exceeds maximum" in lower_err:
+            return "Cannot proceed: File content exceeds the maximum allowed size limit (1 MB)."
         return f"Unable to complete request: {error_msg}"
 
     data = result.get("data", {})
@@ -99,6 +168,21 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
             f"• **Modified:** {mod}"
         )
 
+    if tool_name == "create_directory":
+        return f"Successfully created directory `{data.get('name')}` in `{data.get('parent')}`."
+
+    if tool_name == "create_text_file":
+        return f"Successfully created text file `{data.get('name')}` ({data.get('size_bytes')} bytes)."
+
+    if tool_name == "copy_file":
+        return f"Successfully copied `{data.get('name')}` to `{data.get('destination')}`."
+
+    if tool_name == "move_file":
+        return f"Successfully moved `{data.get('name')}` to `{data.get('destination')}`."
+
+    if tool_name == "rename_file":
+        return f"Successfully renamed `{data.get('old_name')}` to `{data.get('new_name')}`."
+
     return "Action completed successfully."
 
 
@@ -107,16 +191,22 @@ async def route_and_execute_tool(
     ollama_client: OllamaClient | None = None,
     registry: ToolRegistry | None = None,
 ) -> dict[str, Any] | None:
-    """Analyze user message for tool invocation, validate, and execute at most one read-only tool.
+    """Analyze user message for tool invocation, validate, and propose or execute at most one tool.
 
-    Returns dict with {"handled": True, "reply": str} if a tool or unsupported action was routed,
-    or None if the message should proceed through standard conversation chat.
+    For read-only tools: executes immediately and returns reply text.
+    For write action tools: validates and returns a pending action proposal requiring user confirmation.
+    Returns None if message should proceed through standard conversation chat.
     """
     clean_text = user_text.strip()
     if not clean_text:
         return None
 
-    ollama = ollama_client or OllamaClient()
+    if ollama_client is None:
+        from orion.integrations.ollama import OllamaClient
+
+        ollama = OllamaClient()
+    else:
+        ollama = ollama_client
     reg = registry or default_tool_registry
 
     messages = [
@@ -134,7 +224,7 @@ async def route_and_execute_tool(
     if unsupported:
         return {
             "handled": True,
-            "reply": "I cannot perform that action. I only have access to a small set of read-only system monitoring and approved file search tools.",
+            "reply": "I cannot perform that action. I only have access to safe system monitoring and controlled file operations (deletion, overwriting, and arbitrary commands are strictly prohibited).",
         }
 
     if not tool_name or not isinstance(tool_name, str):
@@ -151,8 +241,72 @@ async def route_and_execute_tool(
     if not isinstance(args, dict):
         args = {}
 
-    # Execute exactly one read-only tool
-    exec_result = reg.execute(tool_name, args)
+    tool_def = reg.get_tool(tool_name)
+    if not tool_def:
+        return None
+
+    # Validate arguments against Pydantic schema
+    try:
+        validated_args = tool_def.args_schema.model_validate(args)
+        clean_args = validated_args.model_dump()
+    except ValidationError as err:
+        return {
+            "handled": True,
+            "reply": f"Invalid arguments for {tool_name}: {err.errors()[0].get('msg')}",
+        }
+
+    # If write action: run pre-validations and return proposal for user confirmation
+    if reg.is_write_action(tool_name):
+        try:
+            if tool_name == "create_directory":
+                dest = validate_safe_path(clean_args["path"], must_exist=False)
+                if dest.exists():
+                    return {"handled": True, "reply": f"Cannot create directory: `{dest.name}` already exists."}
+                if not dest.parent.is_dir():
+                    return {"handled": True, "reply": "Cannot create directory: Parent directory does not exist."}
+            elif tool_name == "create_text_file":
+                dest = validate_safe_path(clean_args["path"], must_exist=False)
+                if dest.exists():
+                    return {"handled": True, "reply": f"Cannot create file: `{dest.name}` already exists. Overwriting is strictly prohibited."}
+                if not dest.parent.is_dir():
+                    return {"handled": True, "reply": "Cannot create file: Parent directory does not exist."}
+            elif tool_name in ("copy_file", "move_file"):
+                src = validate_safe_path(clean_args["source"], must_exist=True)
+                if not src.is_file():
+                    return {"handled": True, "reply": "Source must be a regular file."}
+                dest_alias = resolve_folder_alias(clean_args["destination"])
+                dest_cand = Path(dest_alias)
+                dest_target = dest_cand / src.name if dest_cand.is_dir() else dest_cand
+                dest = validate_safe_path(dest_target, must_exist=False)
+                if dest.exists():
+                    return {"handled": True, "reply": f"Cannot proceed: Destination `{dest.name}` already exists. Overwriting is strictly prohibited."}
+                if not dest.parent.is_dir():
+                    return {"handled": True, "reply": "Destination parent directory does not exist."}
+            elif tool_name == "rename_file":
+                src = validate_safe_path(clean_args["source"], must_exist=True)
+                if not src.is_file():
+                    return {"handled": True, "reply": "Source must be a regular file."}
+                new_name = clean_args["new_name"].strip().strip("'\"")
+                if not new_name or "/" in new_name or "\\" in new_name or ".." in new_name:
+                    return {"handled": True, "reply": "New filename must be a simple filename without path separators or directory traversal."}
+                dest = validate_safe_path(src.parent / new_name, must_exist=False)
+                if dest.exists():
+                    return {"handled": True, "reply": f"Cannot rename: Destination `{dest.name}` already exists. Overwriting is strictly prohibited."}
+        except (PermissionError, FileNotFoundError, NotADirectoryError, ValueError) as err:
+            return {"handled": True, "reply": str(err)}
+
+        # Propose action without executing
+        proposal_text = format_action_proposal(tool_name, clean_args)
+        return {
+            "handled": True,
+            "is_proposal": True,
+            "action_type": tool_name,
+            "arguments": clean_args,
+            "proposal_text": proposal_text,
+        }
+
+    # Execute read-only tool
+    exec_result = reg.execute(tool_name, clean_args)
     reply_msg = format_tool_result(tool_name, exec_result)
 
     return {
@@ -161,3 +315,4 @@ async def route_and_execute_tool(
         "result": exec_result,
         "reply": reply_msg,
     }
+

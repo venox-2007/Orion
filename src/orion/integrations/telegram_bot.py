@@ -2,11 +2,12 @@
 
 import asyncio
 from typing import Any
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -23,7 +24,7 @@ from orion.integrations.formatter import (
 from orion.integrations.ollama import OLLAMA_UNAVAILABLE_MESSAGE, OllamaClient
 from orion.memory.database import ConversationMemory
 from orion.tools.registry import ToolRegistry, default_tool_registry
-from orion.tools.router import route_and_execute_tool
+from orion.tools.router import format_tool_result, route_and_execute_tool
 
 UNAUTHORIZED_MESSAGE = "Access restricted: unauthorized user or chat."
 WELCOME_MESSAGE = "Hello! I am ORION, your personal AI assistant. How can I help you today?"
@@ -249,6 +250,38 @@ def create_telegram_app(
             # 1. Attempt natural-language tool routing first
             tool_res = await route_and_execute_tool(user_text, ollama_client=client, registry=reg)
             if tool_res and tool_res.get("handled"):
+                if tool_res.get("is_proposal"):
+                    action_id = conv_memory.create_pending_action(
+                        user_id=owner_id,
+                        action_type=tool_res["action_type"],
+                        payload=tool_res["arguments"],
+                        ttl_seconds=300,
+                    )
+                    proposal_text = tool_res.get("proposal_text", "")
+                    keyboard = InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton("Confirm", callback_data=f"confirm:{action_id}"),
+                                InlineKeyboardButton("Cancel", callback_data=f"cancel:{action_id}"),
+                            ]
+                        ]
+                    )
+                    html_msg = markdown_to_telegram_html(proposal_text)
+                    try:
+                        await update.effective_message.reply_text(
+                            html_msg,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=keyboard,
+                        )
+                    except Exception:
+                        await update.effective_message.reply_text(
+                            clean_markdown_to_plain(proposal_text),
+                            reply_markup=keyboard,
+                        )
+                    conv_memory.add_message(owner_id, "user", user_text)
+                    conv_memory.add_message(owner_id, "assistant", proposal_text)
+                    return
+
                 reply_text = tool_res.get("reply", "")
                 conv_memory.add_message(owner_id, "user", user_text)
                 conv_memory.add_message(owner_id, "assistant", reply_text)
@@ -266,6 +299,99 @@ def create_telegram_app(
 
         await send_formatted_message(update.effective_message, reply_text)
 
+    async def confirmation_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle inline button confirmation or cancellation for pending file actions."""
+        query = update.callback_query
+        if not query:
+            return
+
+        # Restrict confirmation callback strictly to authorized owner
+        if not update.effective_user or update.effective_user.id != owner_id:
+            await query.answer(UNAUTHORIZED_MESSAGE, show_alert=True)
+            return
+
+        await query.answer()
+
+        data = query.data or ""
+        if ":" not in data:
+            return
+        action, action_id = data.split(":", 1)
+
+        async with user_lock:
+            if action == "cancel":
+                success = conv_memory.mark_pending_action_status(
+                    action_id,
+                    from_status="pending",
+                    to_status="cancelled",
+                )
+                if success:
+                    act = conv_memory.get_pending_action(action_id, user_id=owner_id)
+                    if act:
+                        conv_memory.log_action_history(
+                            user_id=owner_id,
+                            action_type=act["action_type"],
+                            payload=act["payload"],
+                            status="cancelled",
+                        )
+                    cancel_msg = "❌ Operation cancelled. No filesystem changes were made."
+                    html_cancel = markdown_to_telegram_html(cancel_msg)
+                    try:
+                        await query.edit_message_text(html_cancel, parse_mode=ParseMode.HTML)
+                    except Exception:
+                        await query.edit_message_text(clean_markdown_to_plain(cancel_msg))
+                    conv_memory.add_message(owner_id, "assistant", cancel_msg)
+                else:
+                    await query.edit_message_text(
+                        "This action is no longer active (already completed, cancelled, or expired)."
+                    )
+                return
+
+            if action == "confirm":
+                act = conv_memory.get_pending_action(action_id, user_id=owner_id)
+                if not act:
+                    await query.edit_message_text("Action not found.")
+                    return
+
+                if act["status"] != "pending":
+                    msg = (
+                        "⏱️ This action has expired. No changes were made."
+                        if act["status"] == "expired"
+                        else "This action was already processed."
+                    )
+                    await query.edit_message_text(msg)
+                    return
+
+                # Atomically claim action to prevent duplicate execution
+                success = conv_memory.mark_pending_action_status(
+                    action_id,
+                    from_status="pending",
+                    to_status="confirmed",
+                )
+                if not success:
+                    await query.edit_message_text("This action was already processed.")
+                    return
+
+                # Re-validate permissions and filesystem state immediately prior to execution
+                exec_result = reg.execute(act["action_type"], act["payload"])
+                status_str = "success" if exec_result.get("success") else "failed"
+
+                conv_memory.log_action_history(
+                    user_id=owner_id,
+                    action_type=act["action_type"],
+                    payload=act["payload"],
+                    status=status_str,
+                    result=exec_result,
+                )
+
+                result_msg = format_tool_result(act["action_type"], exec_result)
+                html_res = markdown_to_telegram_html(result_msg)
+                try:
+                    await query.edit_message_text(html_res, parse_mode=ParseMode.HTML)
+                except Exception:
+                    await query.edit_message_text(clean_markdown_to_plain(result_msg))
+
+                conv_memory.add_message(owner_id, "assistant", result_msg)
+
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle errors cleanly without printing stack traces to chat or stdout."""
         if isinstance(update, Update) and update.effective_message:
@@ -282,6 +408,7 @@ def create_telegram_app(
     app.add_handler(CommandHandler("plan", plan_handler))
     app.add_handler(CommandHandler("tasks", tasks_handler))
     app.add_handler(CommandHandler("task", task_handler))
+    app.add_handler(CallbackQueryHandler(confirmation_callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_error_handler(error_handler)
 
