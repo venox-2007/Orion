@@ -6,44 +6,12 @@ ORION is a private, local-first, open-source personal autonomous AI assistant.
 
 ORION is designed from the ground up to operate locally, respecting user privacy and data sovereignty without reliance on paid proprietary APIs or remote hosting.
 
-### Step 1: Project Foundation
+### Implemented Architecture
 
-This repository currently establishes the foundational architecture:
-- Modular Python packaging separating configuration, core processing, integrations, tools, memory, and automated tests.
-- High-performance, lightweight backend powered by FastAPI.
-- Environment-driven configuration management with secure default settings.
-- Initial health monitoring endpoint (`GET /health`).
-- Automated testing suite setup.
-
----
-
-## Architecture & Project Structure
-
-```text
-orion/
-├── .env.example              # Example environment configuration template
-├── .gitignore                 # Security & runtime exclusions
-├── pyproject.toml             # Project metadata, dependencies, and build config
-├── README.md                  # Project documentation
-├── src/
-│   └── orion/
-│       ├── __init__.py        # Top-level package marker
-│       ├── main.py            # FastAPI application entry point & routes
-│       ├── config/            # Environment variable configuration
-│       │   ├── __init__.py
-│       │   └── settings.py
-│       ├── core/              # Assistant core orchestration (stub)
-│       │   └── __init__.py
-│       ├── integrations/      # Local integrations (stub)
-│       │   └── __init__.py
-│       ├── tools/             # Autonomous tool execution modules (stub)
-│       │   └── __init__.py
-│       └── memory/            # Local memory management & retrieval (stub)
-│           └── __init__.py
-└── tests/
-    ├── __init__.py
-    └── test_health.py         # Automated test suite for health endpoint
-```
+- **FastAPI Core**: Minimal, fast local backend with health monitoring (`GET /health`).
+- **Local Ollama Integration**: Communicates with the local Ollama instance (`http://127.0.0.1:11434`) using the `qwen3.5:4b` model with automatic reasoning tag (`<think>`) stripping.
+- **Telegram Bot**: Long-polling interface via `python-telegram-bot` restricting access strictly to the authenticated owner in private chats.
+- **Environment-based Configuration**: Managed via Pydantic settings without committed credentials.
 
 ---
 
@@ -52,7 +20,10 @@ orion/
 ### Prerequisites
 
 - Python 3.11+
-- Virtual environment tool (such as `venv`)
+- Local Ollama running with the `qwen3.5:4b` model installed:
+  ```bash
+  ollama run qwen3.5:4b
+  ```
 
 ### Installation
 
@@ -62,7 +33,7 @@ orion/
    cd Orion
    ```
 
-2. **Create and activate a virtual environment:**
+2. **Set up virtual environment:**
    ```bash
    python -m venv .venv
    # Windows (PowerShell):
@@ -71,47 +42,38 @@ orion/
    source .venv/bin/activate
    ```
 
-3. **Install the package and dependencies:**
+3. **Install dependencies:**
    ```bash
    pip install -e ".[dev]"
    ```
 
-4. **Configure environment variables:**
+4. **Configure your `.env` file:**
    ```bash
    cp .env.example .env
    ```
+   Open `.env` and configure:
+   - `ORION_TELEGRAM_BOT_TOKEN`: Your bot token obtained from [@BotFather](https://t.me/BotFather).
+   - `ORION_TELEGRAM_OWNER_ID`: Your numeric Telegram user ID (safely obtained from [@userinfobot](https://t.me/userinfobot)).
 
-### Running the Application
+### Running ORION
 
-To start the local FastAPI server:
+Start the assistant with a single command:
 ```bash
-uvicorn orion.main:app --host 127.0.0.1 --port 8000 --reload
+python -m orion.bot
 ```
+This launches the FastAPI service (accessible at `http://127.0.0.1:8000/health`) and initiates Telegram long-polling. No public domain, webhook, or port forwarding is required.
 
 ### Running Tests
 
-Execute the automated test suite using `pytest`:
+Execute the automated test suite:
 ```bash
 pytest
 ```
 
 ---
 
-## Endpoints
-
-### `GET /health`
-Returns the operational health status of the service.
-
-- **Response `200 OK`:**
-  ```json
-  {
-    "status": "healthy"
-  }
-  ```
-
----
-
 ## Security & Privacy Guidelines
 
-- **Zero Secret Commits:** Never hardcode credentials, API tokens, or secrets. All runtime secrets must be passed via environment variables (`.env`, which is strictly ignored by Git).
-- **Local Isolation:** Local databases, session states, and conversation logs are excluded from source control.
+- **Owner-only Access**: Only the configured Telegram user ID can interact with the bot in private chats. Unauthorized users are rejected.
+- **Local Isolation**: All inference runs locally on your machine via Ollama.
+- **Zero Secrets in Git**: Secrets (`.env`, tokens, IDs) are strictly excluded from source control.

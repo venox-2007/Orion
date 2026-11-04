@@ -16,7 +16,11 @@ dependencies = [
     "uvicorn[standard]>=0.28.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
+    "python-telegram-bot>=21.0",
 ]
+
+[project.scripts]
+orion = "orion.bot:start"
 
 [project.optional-dependencies]
 dev = [

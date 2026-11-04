@@ -13,12 +13,44 @@ class Settings(BaseSettings):
     port: int = 8000
     debug: bool = False
 
+    # Telegram configuration
+    telegram_bot_token: str | None = None
+    telegram_owner_id: int | None = None
+
+    # Ollama configuration
+    ollama_model: str = "qwen3.5:4b"
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_timeout: float = 60.0
+
     model_config = SettingsConfigDict(
         env_prefix="ORION_",
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    def validate_telegram_configuration(self) -> None:
+        """Validate required Telegram credentials before bot startup.
+
+        Raises ValueError with clear local setup instructions if missing or invalid.
+        Never logs or prints secret values.
+        """
+        missing: list[str] = []
+        if not self.telegram_bot_token or not self.telegram_bot_token.strip():
+            missing.append("ORION_TELEGRAM_BOT_TOKEN")
+        if self.telegram_owner_id is None or self.telegram_owner_id <= 0:
+            missing.append("ORION_TELEGRAM_OWNER_ID (must be a positive integer)")
+
+        if missing:
+            raise ValueError(
+                "Missing or invalid Telegram configuration:\n"
+                + "\n".join(f"- {item}" for item in missing)
+                + "\n\nSetup instructions:\n"
+                "1. Copy .env.example to .env (if not done yet).\n"
+                "2. Obtain your bot token from @BotFather on Telegram.\n"
+                "3. Obtain your numeric user ID from @userinfobot on Telegram.\n"
+                "4. Add ORION_TELEGRAM_BOT_TOKEN and ORION_TELEGRAM_OWNER_ID to your .env file."
+            )
 
 
 @lru_cache
