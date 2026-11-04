@@ -1,5 +1,6 @@
-"""Persistent SQLite conversation memory for ORION."""
+"""Persistent SQLite conversation memory and task plans for ORION."""
 
+import json
 from pathlib import Path
 import sqlite3
 import threading
@@ -41,6 +42,24 @@ class ConversationMemory:
                     """
                     CREATE INDEX IF NOT EXISTS idx_messages_user_id
                     ON messages(user_id)
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS task_plans (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        goal TEXT NOT NULL,
+                        steps_json TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'planned',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_task_plans_user_id
+                    ON task_plans(user_id)
                     """
                 )
                 conn.commit()
@@ -87,3 +106,88 @@ class ConversationMemory:
                 deleted_count = cursor.rowcount
                 conn.commit()
         return deleted_count
+
+    def save_task_plan(
+        self,
+        user_id: int,
+        goal: str,
+        steps: list[dict[str, Any]],
+        status: str = "planned",
+    ) -> int:
+        """Store an action plan and return its database ID."""
+        clean_goal = goal.strip()
+        steps_serialized = json.dumps(steps)
+
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO task_plans (user_id, goal, steps_json, status)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (user_id, clean_goal, steps_serialized, status),
+                )
+                conn.commit()
+                return int(cursor.lastrowid)
+
+    def get_recent_task_plans(self, user_id: int, limit: int = 5) -> list[dict[str, Any]]:
+        """Retrieve recent plans for a user."""
+        if limit <= 0:
+            return []
+
+        query = """
+            SELECT id, goal, status, created_at, steps_json
+            FROM task_plans
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.execute(query, (user_id, limit))
+                rows = cursor.fetchall()
+
+        plans = []
+        for row in rows:
+            try:
+                steps = json.loads(row[4])
+            except Exception:
+                steps = []
+            plans.append(
+                {
+                    "id": row[0],
+                    "goal": row[1],
+                    "status": row[2],
+                    "created_at": row[3],
+                    "steps": steps,
+                }
+            )
+        return plans
+
+    def get_task_plan(self, user_id: int, plan_id: int) -> dict[str, Any] | None:
+        """Retrieve a specific action plan by ID for a user."""
+        query = """
+            SELECT id, goal, steps_json, status, created_at
+            FROM task_plans
+            WHERE id = ? AND user_id = ?
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.execute(query, (plan_id, user_id))
+                row = cursor.fetchone()
+
+        if not row:
+            return None
+
+        try:
+            steps = json.loads(row[2])
+        except Exception:
+            steps = []
+
+        return {
+            "id": row[0],
+            "goal": row[1],
+            "steps": steps,
+            "status": row[3],
+            "created_at": row[4],
+        }

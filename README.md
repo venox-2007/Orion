@@ -68,6 +68,9 @@ This launches the FastAPI service (accessible at `http://127.0.0.1:8000/health`)
 
 - `/start`: Greeting and verification of owner authorization.
 - `/reset`: Prompt to clear conversation memory (confirm by sending `/reset confirm`).
+- `/plan <goal>`: Break down a goal into an ordered, structured action plan (up to 8 steps).
+- `/tasks`: List recent persistent action plans.
+- `/task <id>`: View the detailed steps and status of a specific action plan.
 
 ### Running Tests
 

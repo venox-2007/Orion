@@ -1,6 +1,8 @@
 """Ollama integration client for local LLM inference."""
 
+import json
 import re
+from typing import Any
 import httpx
 from orion.config.settings import get_settings
 
@@ -73,3 +75,38 @@ class OllamaClient:
                 return cleaned if cleaned else OLLAMA_UNAVAILABLE_MESSAGE
         except Exception:
             return OLLAMA_UNAVAILABLE_MESSAGE
+
+    async def generate_structured_json(
+        self,
+        messages: list[dict[str, str]],
+        num_predict: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Query Ollama with JSON formatting enabled and return parsed JSON data."""
+        settings = get_settings()
+        budget = num_predict or getattr(settings, "ollama_plan_num_predict", 1024)
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "think": False,
+            "keep_alive": "30m",
+            "format": "json",
+            "options": {"num_predict": budget},
+        }
+
+        url = f"{self.base_url}/api/chat"
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(url, json=payload)
+                if response.status_code != 200:
+                    return None
+                data = response.json()
+                raw_content = data.get("message", {}).get("content", "")
+                cleaned = clean_model_reply(raw_content)
+                if not cleaned:
+                    return None
+                parsed = json.loads(cleaned)
+                return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None

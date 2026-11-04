@@ -14,6 +14,7 @@ from telegram.ext import (
 )
 
 from orion.config.settings import get_settings
+from orion.core.planner import generate_task_plan
 from orion.integrations.formatter import (
     clean_markdown_to_plain,
     markdown_to_telegram_html,
@@ -47,6 +48,22 @@ async def send_formatted_message(message: Any, text: str) -> None:
         except Exception:
             plain_chunk = clean_markdown_to_plain(chunk)
             await message.reply_text(plain_chunk)
+
+
+def format_plan_message(plan_id: int, goal: str, steps: list[dict[str, Any]]) -> str:
+    """Format an action plan cleanly with steps and clear unexecuted status."""
+    lines = [
+        f"**Action Plan #{plan_id}**",
+        f"**Goal:** {goal}",
+        "**Status:** Planned — not executed\n",
+        "**Proposed Steps:**",
+    ]
+    for step in steps:
+        step_id = step.get("id", "-")
+        desc = step.get("description", "").strip()
+        lines.append(f"{step_id}. {desc} [Planned]")
+    lines.append("\n*Note: Planned action proposals — not executed.*")
+    return "\n".join(lines)
 
 
 def is_authorized_owner(update: Update, owner_id: int) -> bool:
@@ -96,6 +113,115 @@ def create_telegram_app(
         else:
             await send_formatted_message(update.effective_message, RESET_CONFIRMATION_PROMPT)
 
+    async def plan_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if not update.effective_message:
+            return
+
+        raw_text = update.effective_message.text or ""
+        parts = raw_text.split(maxsplit=1)
+        goal = parts[1].strip() if len(parts) > 1 else ""
+
+        if not goal:
+            await send_formatted_message(
+                update.effective_message,
+                "Please specify a goal to plan. Example:\n`/plan Organize project documentation`",
+            )
+            return
+
+        max_len = getattr(settings, "max_goal_length", 500)
+        if len(goal) > max_len:
+            await send_formatted_message(
+                update.effective_message,
+                f"Goal is too long. Please keep your goal under {max_len} characters.",
+            )
+            return
+
+        if update.effective_chat:
+            await context.bot.send_chat_action(
+                chat_id=update.effective_chat.id,
+                action=ChatAction.TYPING,
+            )
+
+        async with user_lock:
+            plan = await generate_task_plan(goal, client=client)
+            if not plan or not plan.steps:
+                await send_formatted_message(
+                    update.effective_message,
+                    "Unable to generate a structured action plan for this goal. Please rephrase or provide more detail.",
+                )
+                return
+
+            plan_dict_steps = [s.model_dump() for s in plan.steps]
+            plan_id = conv_memory.save_task_plan(
+                user_id=owner_id,
+                goal=plan.goal,
+                steps=plan_dict_steps,
+                status=plan.status,
+            )
+
+        formatted_plan = format_plan_message(plan_id, plan.goal, plan_dict_steps)
+        await send_formatted_message(update.effective_message, formatted_plan)
+
+    async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if not update.effective_message:
+            return
+
+        async with user_lock:
+            plans = conv_memory.get_recent_task_plans(owner_id, limit=5)
+
+        if not plans:
+            await send_formatted_message(
+                update.effective_message,
+                "No action plans found. Create one using:\n`/plan <goal>`",
+            )
+            return
+
+        lines = ["**Recent Action Plans:**"]
+        for p in plans:
+            goal_preview = p["goal"][:60] + ("..." if len(p["goal"]) > 60 else "")
+            lines.append(f"• **#{p['id']}**: {goal_preview} [Planned — not executed]")
+
+        lines.append("\n*View details with `/task <id>`*")
+        await send_formatted_message(update.effective_message, "\n".join(lines))
+
+    async def task_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if not update.effective_message:
+            return
+
+        args = context.args or []
+        if not args or not args[0].isdigit():
+            await send_formatted_message(
+                update.effective_message,
+                "Please provide a valid numeric plan ID. Example:\n`/task 1`",
+            )
+            return
+
+        plan_id = int(args[0])
+        async with user_lock:
+            plan = conv_memory.get_task_plan(owner_id, plan_id)
+
+        if not plan:
+            await send_formatted_message(update.effective_message, "Plan not found.")
+            return
+
+        formatted = format_plan_message(plan["id"], plan["goal"], plan["steps"])
+        await send_formatted_message(update.effective_message, formatted)
+
     async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not is_authorized_owner(update, owner_id):
             if update.effective_message:
@@ -141,6 +267,9 @@ def create_telegram_app(
     app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("reset", reset_handler))
+    app.add_handler(CommandHandler("plan", plan_handler))
+    app.add_handler(CommandHandler("tasks", tasks_handler))
+    app.add_handler(CommandHandler("task", task_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_error_handler(error_handler)
 

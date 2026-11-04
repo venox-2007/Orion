@@ -21,10 +21,12 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen3.5:4b"
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_timeout: float = 60.0
+    ollama_plan_num_predict: int = 1024
 
     # Memory & storage configuration
     database_path: str = "data/orion.db"
     max_history_messages: int = 10
+    max_goal_length: int = 500
 
     model_config = SettingsConfigDict(
         env_prefix="ORION_",
