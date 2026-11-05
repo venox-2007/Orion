@@ -6,9 +6,13 @@ from pydantic import BaseModel, Field, ValidationError
 
 from orion.tools.app_launcher import launch_application
 from orion.tools.desktop_inspector import (
+    focus_application_window,
     get_active_window,
     get_application_window_status,
     list_open_windows,
+    maximize_application_window,
+    minimize_application_window,
+    restore_application_window,
 )
 from orion.tools.filesystem import find_files, get_file_info, list_files
 from orion.tools.filesystem_actions import (
@@ -90,6 +94,13 @@ class AppWindowStatusArgs(BaseModel):
     """Schema for inspecting window status of an approved application."""
 
     app_id: str = Field(min_length=1, max_length=50, description="Approved application ID or friendly name")
+
+
+class WindowManagementArgs(BaseModel):
+    """Schema for controlled window management (focus/minimize/maximize/restore)."""
+
+    app_id: str = Field(min_length=1, max_length=50, description="Approved application ID")
+    window_token: str | None = Field(default=None, max_length=100, description="Opaque window selection token for multi-window apps")
 
 
 class ToolDefinition:
@@ -217,6 +228,35 @@ class ToolRegistry:
             description="Launch an approved Windows application on the owner's laptop. Requires user confirmation.",
             args_schema=LaunchApplicationArgs,
             func=launch_application,
+            is_write_action=True,
+        )
+        # Controlled window management tools (Step 11 — require user confirmation before execution)
+        self.register(
+            name="focus_application_window",
+            description="Bring an approved application window to the foreground. Requires user confirmation.",
+            args_schema=WindowManagementArgs,
+            func=focus_application_window,
+            is_write_action=True,
+        )
+        self.register(
+            name="minimize_application_window",
+            description="Minimize an approved application window. Requires user confirmation.",
+            args_schema=WindowManagementArgs,
+            func=minimize_application_window,
+            is_write_action=True,
+        )
+        self.register(
+            name="maximize_application_window",
+            description="Maximize an approved application window. Requires user confirmation.",
+            args_schema=WindowManagementArgs,
+            func=maximize_application_window,
+            is_write_action=True,
+        )
+        self.register(
+            name="restore_application_window",
+            description="Restore a minimized/maximized approved application window to Normal state. Requires user confirmation.",
+            args_schema=WindowManagementArgs,
+            func=restore_application_window,
             is_write_action=True,
         )
 

@@ -40,6 +40,11 @@ TOOL_ROUTER_SYSTEM_PROMPT = (
     "Available controlled application launcher tool (requires explicit user confirmation):\n"
     '- launch_application: Launch an approved Windows application. Arguments: {"app_id": "<app_id>"}\n'
     "Approved app_ids: word, excel, powerpoint, notepad, calculator, sticky_notes, file_explorer, vscode, antigravity_ide, chatgpt, claude, edge, comet, whatsapp, teams, zoom, vlc, paint, snipping_tool, winrar.\n\n"
+    "Available controlled window management tools (require explicit user confirmation):\n"
+    '- focus_application_window: Bring an approved app window to the foreground. Arguments: {"app_id": "<app_id>"} optionally {"window_token": "<token_id>"}.\n'
+    '- minimize_application_window: Minimize an approved app window. Arguments: {"app_id": "<app_id>"} optionally {"window_token": "<token_id>"}.\n'
+    '- maximize_application_window: Maximize an approved app window. Arguments: {"app_id": "<app_id>"} optionally {"window_token": "<token_id>"}.\n'
+    '- restore_application_window: Restore a minimized/maximized approved app window to Normal. Arguments: {"app_id": "<app_id>"} optionally {"window_token": "<token_id>"}.\n\n'
     "Rules for directory and file paths:\n"
     "- For standard folders, use folder aliases: 'Downloads', 'Documents', or 'Desktop' (e.g. {'directory': 'Downloads'}).\n"
     "- Never invent usernames or placeholder paths like 'C:\\\\Users\\\\[username]\\\\' or '%USERPROFILE%'.\n"
@@ -49,7 +54,12 @@ TOOL_ROUTER_SYSTEM_PROMPT = (
     '2. If the user asks for unsupported actions (e.g., deleting/removing files, overwriting existing files, running shell/scripts/code, launching unapproved apps, browser automation), return: {"tool": null, "unsupported": true}\n'
     '3. If the user asks for a single tool above, return: {"tool": "<tool_name>", "arguments": {...}}\n'
     '4. If the user asks for a multi-step workflow (2 or 3 file operations), return: {"is_workflow": true, "steps": [{"step_id": 1, "tool": "<name>", "arguments": {...}, "description": "..."}, ...]}\n'
-    "5. Return strict JSON only. Never exceed 3 steps. Do not invent tools."
+    "5. If the user asks to focus/bring to front/bring up/switch to/foreground an approved app window, return focus_application_window.\n"
+    "6. If the user asks to minimize an approved app window, return minimize_application_window.\n"
+    "7. If the user asks to maximize an approved app window, return maximize_application_window.\n"
+    "8. If the user asks to restore an approved app window, return restore_application_window.\n"
+    "9. If the user asks a question about window state (is it minimized? is it open?), return get_application_window_status, NOT a write tool.\n"
+    "10. Return strict JSON only. Never exceed 3 steps. Do not invent tools."
 )
 
 
@@ -150,13 +160,46 @@ def format_action_proposal(tool_name: str, args: dict[str, Any]) -> str:
             f"Launch **{display_name}** on your laptop?\n\n"
             "*Confirm to launch the application.*"
         )
+    _WINDOW_ACTION_LABELS = {
+        "focus_application_window": "Focus window",
+        "minimize_application_window": "Minimize window",
+        "maximize_application_window": "Maximize window",
+        "restore_application_window": "Restore window",
+    }
+    if tool_name in _WINDOW_ACTION_LABELS:
+        action_label = _WINDOW_ACTION_LABELS[tool_name]
+        app_id = args.get("app_id", "")
+        app_obj = get_approved_apps().get(app_id)
+        display_name = app_obj.display_name if app_obj else app_id
+        return (
+            "⚠️ **Action Confirmation Required**\n\n"
+            f"{action_label} **{display_name}**?\n\n"
+            f"• **Action:** {action_label}\n"
+            f"• **Application:** {display_name}\n\n"
+            "*Confirm to proceed.*"
+        )
     return "⚠️ **Action Confirmation Required**\nPlease confirm or cancel this operation."
 
 
 def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
     """Format tool execution results into concise, human-readable text without raw JSON."""
+    data = result.get("data", {}) if isinstance(result.get("data"), dict) else {}
+
+    # Check for requires_selection (multi-window disambiguation)
+    if result.get("requires_selection") or data.get("requires_selection"):
+        sel_source = data if data.get("requires_selection") else result
+        disp = sel_source.get("display_name", sel_source.get("app_id", "Application"))
+        windows = sel_source.get("windows", [])
+        if not windows:
+            return f"{disp} has multiple open windows but no selection options could be generated."
+        lines = [f"**{disp}** has multiple open windows. Please select one:"]
+        for w in windows:
+            lines.append(f"• **{w['label']}** — {w['state']} (token: `{w['token_id']}`)")
+        lines.append("\nReply with the window management action and the token, e.g.:\n`minimize vscode window_token: <token_id>`")
+        return "\n".join(lines)
+
     if not result.get("success"):
-        error_msg = result.get("error", "Unknown error")
+        error_msg = result.get("error") or data.get("error", "Unknown error")
         lower_err = error_msg.lower()
         if "already exists" in lower_err:
             return "Cannot proceed: The destination file or directory already exists. Overwriting is strictly prohibited."
@@ -279,11 +322,32 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
     if tool_name == "get_application_window_status":
         return data.get("message", "Window status retrieved.")
 
+    _WINDOW_MGMT_TOOLS = {
+        "focus_application_window",
+        "minimize_application_window",
+        "maximize_application_window",
+        "restore_application_window",
+    }
+    if tool_name in _WINDOW_MGMT_TOOLS:
+        # Handle requires_selection (multi-window disambiguation)
+        if result.get("requires_selection"):
+            disp = result.get("display_name", result.get("app_id", "Application"))
+            windows = result.get("windows", [])
+            if not windows:
+                return f"{disp} has multiple open windows but no selection options could be generated."
+            lines = [f"**{disp}** has multiple open windows. Please select one:"]
+            for w in windows:
+                lines.append(f"• **{w['label']}** — {w['state']} (token: `{w['token_id']}`)")
+            lines.append("\nReply with the window management action and the token, e.g.:\n`minimize vscode window_token: <token_id>`")
+            return "\n".join(lines)
+        # Success result
+        return data.get("message", "Window operation completed.")
+
     return "Action completed successfully."
 
 
 def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
-    """Deterministically check if text is asking about desktop windows or active app."""
+    """Deterministically check if text is asking about desktop windows, active app, or window management."""
     clean = clean_text.strip().lower()
     clean_no_punct = re.sub(r"[^\w\s]", "", clean).strip()
 
@@ -321,7 +385,78 @@ def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
     if any(p in clean_no_punct for p in active_win_patterns):
         return {"tool": "get_active_window", "arguments": {}}
 
-    # 3. Status for specific application:
+    # 3. Window management commands (Step 11) — imperative actions
+    # Patterns for focus
+    focus_match = re.search(
+        r"(?:focus|bring\s+up|bring\s+to\s+(?:the\s+)?front|switch\s+to|foreground)\s+([a-zA-Z0-9_\s]+?)(?:\s+window)?[\s.!?]*$",
+        clean,
+    )
+    if not focus_match:
+        # Alternative: "bring <app> to the front/foreground"
+        focus_match = re.search(
+            r"(?:bring|put)\s+([a-zA-Z0-9_\s]+?)\s+(?:to\s+(?:the\s+)?(?:front|foreground)|up)[\s.!?]*$",
+            clean,
+        )
+    if focus_match:
+        candidate = focus_match.group(1).strip()
+        candidate = re.sub(r"^(?:the\s+|my\s+)", "", candidate).strip()
+        candidate = re.sub(r"\s+(?:app|application)$", "", candidate).strip()
+        blocked, reason = is_app_blocked(candidate)
+        if blocked:
+            return {"handled": True, "reply": f"Application '{candidate}' is not in the approved application allowlist. {reason}"}
+        app_id = resolve_app_alias(candidate)
+        if app_id:
+            return {"is_window_action": True, "tool": "focus_application_window", "arguments": {"app_id": app_id}}
+
+    # Patterns for minimize
+    minimize_match = re.search(
+        r"minimize\s+([a-zA-Z0-9_\s]+?)(?:\s+window)?[\s.!?]*$",
+        clean,
+    )
+    if minimize_match:
+        candidate = minimize_match.group(1).strip()
+        candidate = re.sub(r"^(?:the\s+|my\s+)", "", candidate).strip()
+        candidate = re.sub(r"\s+(?:app|application)$", "", candidate).strip()
+        blocked, reason = is_app_blocked(candidate)
+        if blocked:
+            return {"handled": True, "reply": f"Application '{candidate}' is not in the approved application allowlist. {reason}"}
+        app_id = resolve_app_alias(candidate)
+        if app_id:
+            return {"is_window_action": True, "tool": "minimize_application_window", "arguments": {"app_id": app_id}}
+
+    # Patterns for maximize
+    maximize_match = re.search(
+        r"maximize\s+([a-zA-Z0-9_\s]+?)(?:\s+window)?[\s.!?]*$",
+        clean,
+    )
+    if maximize_match:
+        candidate = maximize_match.group(1).strip()
+        candidate = re.sub(r"^(?:the\s+|my\s+)", "", candidate).strip()
+        candidate = re.sub(r"\s+(?:app|application)$", "", candidate).strip()
+        blocked, reason = is_app_blocked(candidate)
+        if blocked:
+            return {"handled": True, "reply": f"Application '{candidate}' is not in the approved application allowlist. {reason}"}
+        app_id = resolve_app_alias(candidate)
+        if app_id:
+            return {"is_window_action": True, "tool": "maximize_application_window", "arguments": {"app_id": app_id}}
+
+    # Patterns for restore
+    restore_match = re.search(
+        r"restore\s+([a-zA-Z0-9_\s]+?)(?:\s+window)?[\s.!?]*$",
+        clean,
+    )
+    if restore_match:
+        candidate = restore_match.group(1).strip()
+        candidate = re.sub(r"^(?:the\s+|my\s+)", "", candidate).strip()
+        candidate = re.sub(r"\s+(?:app|application)$", "", candidate).strip()
+        blocked, reason = is_app_blocked(candidate)
+        if blocked:
+            return {"handled": True, "reply": f"Application '{candidate}' is not in the approved application allowlist. {reason}"}
+        app_id = resolve_app_alias(candidate)
+        if app_id:
+            return {"is_window_action": True, "tool": "restore_application_window", "arguments": {"app_id": app_id}}
+
+    # 4. Status for specific application (read-only):
     # "is vs code open", "is whatsapp minimized", "how many excel windows are open", "is word open"
     match_status = re.search(
         r"(?:is|how\s+many)\s+(?:window(?:s)?\s+(?:of|for)\s+)?([a-zA-Z0-9_\s]+?)\s+(?:windows?\s+)?(?:are\s+|is\s+)?(?:open|running|minimized|maximized|active)",
@@ -437,6 +572,48 @@ async def route_and_execute_tool(
     if win_query:
         if win_query.get("handled"):
             return win_query
+
+        # Window management action (Step 11): needs confirmation proposal
+        if win_query.get("is_window_action"):
+            tool_name = win_query["tool"]
+            tool_args = win_query.get("arguments", {})
+            app_id = tool_args.get("app_id", "")
+
+            # Validate app exists in approved list
+            approved = get_approved_apps()
+            if not app_id or app_id not in approved:
+                return {"handled": True, "reply": f"Application is not in the approved application allowlist."}
+
+            # Pre-check: does the app have any open windows?
+            from orion.tools.desktop_inspector import _enumerate_windows_native as _enum_wins
+            try:
+                current_wins = _enum_wins()
+            except Exception:
+                current_wins = []
+            app_windows = [w for w in current_wins if w.app_id == app_id]
+            if not app_windows:
+                disp = approved[app_id].display_name
+                return {"handled": True, "reply": f"{disp} does not have any open windows."}
+
+            # If multiple windows and no token: execute the tool to get selection options
+            if len(app_windows) > 1:
+                exec_res = reg.execute(tool_name, tool_args)
+                data = exec_res.get("data", {})
+                if data.get("requires_selection"):
+                    reply = format_tool_result(tool_name, exec_res)
+                    return {"handled": True, "reply": reply}
+
+            # Single window (or token provided): return proposal for confirmation
+            proposal_text = format_action_proposal(tool_name, tool_args)
+            return {
+                "handled": True,
+                "is_proposal": True,
+                "action_type": tool_name,
+                "arguments": tool_args,
+                "proposal_text": proposal_text,
+            }
+
+        # Read-only window/desktop query: execute immediately
         tool_name = win_query["tool"]
         tool_args = win_query.get("arguments", {})
         exec_res = reg.execute(tool_name, tool_args)
@@ -589,6 +766,20 @@ async def route_and_execute_tool(
                     app_obj = get_approved_apps().get(resolved_id)
                     disp = app_obj.display_name if app_obj else resolved_id
                     return {"handled": True, "reply": f"Cannot launch {disp}: Application is not currently installed or available on this system."}
+            elif tool_name in (
+                "focus_application_window",
+                "minimize_application_window",
+                "maximize_application_window",
+                "restore_application_window",
+            ):
+                raw_id = clean_args.get("app_id", "")
+                resolved_id = resolve_app_alias(raw_id)
+                if not resolved_id:
+                    blocked, reason = is_app_blocked(raw_id)
+                    if blocked:
+                        return {"handled": True, "reply": f"Application '{raw_id}' is not in the approved application allowlist. {reason}"}
+                    return {"handled": True, "reply": f"Application '{raw_id}' is not in the approved application allowlist. Use /apps to see approved applications."}
+                clean_args["app_id"] = resolved_id
         except (PermissionError, FileNotFoundError, NotADirectoryError, ValueError) as err:
             return {"handled": True, "reply": str(err)}
 

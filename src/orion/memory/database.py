@@ -10,6 +10,22 @@ import uuid
 
 from orion.config.settings import get_settings
 
+# Display names for action_type values in history/status
+_ACTION_TYPE_DISPLAY = {
+    "focus_application_window": "Focus window",
+    "minimize_application_window": "Minimize window",
+    "maximize_application_window": "Maximize window",
+    "restore_application_window": "Restore window",
+    "launch_application": "Launch application",
+}
+
+_WINDOW_MANAGEMENT_ACTION_TYPES = frozenset({
+    "focus_application_window",
+    "minimize_application_window",
+    "maximize_application_window",
+    "restore_application_window",
+})
+
 
 class ConversationMemory:
     """Manages persistent SQLite message storage for conversation turns."""
@@ -759,7 +775,7 @@ class ConversationMemory:
                     summary = f"Launch {app_disp}"
                     status_out = status_val
             else:
-                summary = act_type.replace("_", " ").title()
+                summary = _ACTION_TYPE_DISPLAY.get(act_type, act_type.replace("_", " ").title())
                 status_out = status_val
 
             return {
@@ -848,7 +864,7 @@ class ConversationMemory:
                     summary = f"Launch {app_disp}"
                     status_str = status_val
             else:
-                summary = act_type.replace("_", " ").title()
+                summary = _ACTION_TYPE_DISPLAY.get(act_type, act_type.replace("_", " ").title())
                 status_str = status_val
 
             entries.append({

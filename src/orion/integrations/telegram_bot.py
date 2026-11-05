@@ -40,8 +40,25 @@ HELP_MESSAGE = (
     "• `/plan <goal>` — Generate structured action plan\n"
     "• `/tasks` — View recent action plans\n"
     "• `/task <id>` — View details of a specific plan\n"
-    "• `/reset` — Clear conversation history"
+    "• `/reset` — Clear conversation history\n"
+    "\n*Window management (focus/minimize/maximize/restore) is done via natural language + confirmation.*"
 )
+
+# Display names for action_type values used in history/status
+ACTION_TYPE_DISPLAY: dict[str, str] = {
+    "focus_application_window": "Focus window",
+    "minimize_application_window": "Minimize window",
+    "maximize_application_window": "Maximize window",
+    "restore_application_window": "Restore window",
+    "launch_application": "Launch application",
+}
+
+_WINDOW_MANAGEMENT_ACTION_TYPES = frozenset({
+    "focus_application_window",
+    "minimize_application_window",
+    "maximize_application_window",
+    "restore_application_window",
+})
 RESET_CONFIRMATION_PROMPT = (
     "Are you sure you want to clear your conversation history? "
     "To proceed, send:\n`/reset confirm`"
@@ -492,6 +509,14 @@ def create_telegram_app(
                             status="cancelled",
                         )
                         cancel_msg = f"Pending launch of `{name}` has been cancelled. No application was launched."
+                    elif act_type in _WINDOW_MANAGEMENT_ACTION_TYPES:
+                        conv_memory.log_action_history(
+                            user_id=owner_id,
+                            action_type=act_type,
+                            payload=item["payload"],
+                            status="cancelled",
+                        )
+                        cancel_msg = "Pending window operation cancelled. No changes were made."
                     else:
                         name = act_type.replace("_", " ").title()
                         cancel_msg = f"Pending task `{name}` has been cancelled. No filesystem changes were made."
@@ -803,6 +828,8 @@ def create_telegram_app(
                         )
                     if act and act.get("action_type") == "launch_application":
                         cancel_msg = "❌ Operation cancelled. No application was launched."
+                    elif act and act.get("action_type") in _WINDOW_MANAGEMENT_ACTION_TYPES:
+                        cancel_msg = "❌ Pending window operation cancelled. No changes were made."
                     else:
                         cancel_msg = "❌ Operation cancelled. No filesystem changes were made."
                     html_cancel = markdown_to_telegram_html(cancel_msg)
@@ -866,6 +893,32 @@ def create_telegram_app(
                         return
 
                 exec_result = reg.execute(act["action_type"], act["payload"])
+                tool_data = exec_result.get("data", {})
+
+                # Handle requires_selection for window management (multi-window case)
+                if act["action_type"] in _WINDOW_MANAGEMENT_ACTION_TYPES and tool_data.get("requires_selection"):
+                    windows = tool_data.get("windows", [])
+                    disp = tool_data.get("display_name", act["payload"].get("app_id", "Application"))
+                    if windows:
+                        sel_lines = [f"<b>{disp}</b> has multiple open windows. Please select which one:"]
+                        buttons = []
+                        for w in windows:
+                            tok_id = w["token_id"]
+                            label = w["label"]
+                            state = w["state"]
+                            # callback_data must be ≤ 64 bytes: "win_sel:<tok_id>:<action_type>"
+                            cb = f"win_sel:{tok_id}:{act['action_type']}"
+                            buttons.append([InlineKeyboardButton(f"{label} ({state})", callback_data=cb)])
+                        sel_keyboard = InlineKeyboardMarkup(buttons)
+                        sel_text = "\n".join(sel_lines)
+                        try:
+                            await query.edit_message_text(sel_text, parse_mode=ParseMode.HTML, reply_markup=sel_keyboard)
+                        except Exception:
+                            await query.edit_message_text(clean_markdown_to_plain(sel_text), reply_markup=sel_keyboard)
+                    else:
+                        await query.edit_message_text(f"Window selection failed: no options available.")
+                    return
+
                 status_str = "success" if exec_result.get("success") else "failed"
 
                 conv_memory.log_action_history(
@@ -884,6 +937,57 @@ def create_telegram_app(
                     await query.edit_message_text(clean_markdown_to_plain(result_msg))
 
                 conv_memory.add_message(owner_id, "assistant", result_msg)
+
+            # Handle multi-window selection callbacks: "win_sel:<token_id>:<action_type>"
+            if action == "win_sel":
+                # action_id here is actually "<token_id>:<action_type>" from the split on first ":"
+                # We split the remaining parts
+                parts = action_id.split(":", 1)
+                if len(parts) != 2:
+                    await query.answer("Invalid window selection.", show_alert=True)
+                    return
+                token_id, win_action_type = parts
+                if win_action_type not in _WINDOW_MANAGEMENT_ACTION_TYPES:
+                    await query.answer("Invalid window action type.", show_alert=True)
+                    return
+
+                # Resolve token to get app_id
+                from orion.tools.desktop_inspector import _window_tokens
+                tok = _window_tokens.get(token_id)
+                if not tok:
+                    await query.edit_message_text("Window selection has expired. Please retry the operation.")
+                    return
+                if tok.is_expired():
+                    _window_tokens.pop(token_id, None)
+                    await query.edit_message_text("Window selection has expired. Please retry the operation.")
+                    return
+
+                app_id = tok.app_id
+                payload = {"app_id": app_id, "window_token": token_id}
+
+                # Create a new pending action with specific token and present final confirmation
+                new_action_id = conv_memory.create_pending_action(
+                    user_id=owner_id,
+                    action_type=win_action_type,
+                    payload=payload,
+                    ttl_seconds=120,
+                )
+                from orion.tools.router import format_action_proposal
+                proposal_text = format_action_proposal(win_action_type, {"app_id": app_id})
+                # Append window label context
+                proposal_text += f"\n\n*Selected: {tok.label}*"
+
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("Confirm", callback_data=f"confirm:{new_action_id}"),
+                        InlineKeyboardButton("Cancel", callback_data=f"cancel:{new_action_id}"),
+                    ]
+                ])
+                html_prop = markdown_to_telegram_html(proposal_text)
+                try:
+                    await query.edit_message_text(html_prop, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                except Exception:
+                    await query.edit_message_text(clean_markdown_to_plain(proposal_text), reply_markup=keyboard)
 
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle errors cleanly without printing stack traces to chat or stdout."""

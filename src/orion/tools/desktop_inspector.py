@@ -1,9 +1,9 @@
-"""Safe, read-only Windows desktop window inspector for ORION (Step 10).
+"""Safe Windows desktop window inspector and controlled window manager for ORION (Steps 10–11).
 
 Strictly enforces:
-- Read-only window discovery, active window detection, and state inspection.
+- Read-only window discovery, active window detection, and state inspection (Step 10).
+- Controlled window focus/minimize/maximize/restore with confirmation and re-validation (Step 11).
 - Reuse of the exact 20-app allowlist from Step 9 (no secondary allowlists).
-- No desktop automation or control (no focus changes, resizing, or closing).
 - No screenshots, OCR, screen pixels, window text, clipboard, or keystroke capture.
 - Process paths, PIDs, and window handles remain internal and are never leaked.
 - Unapproved applications and system shell windows are filtered out completely.
@@ -12,11 +12,13 @@ Strictly enforces:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import logging
 import os
 from pathlib import Path
 import sys
-from typing import Any, Literal
+import time
+from typing import Any, ClassVar, Literal
 
 from orion.tools.app_launcher import (
     APPROVED_APPLICATIONS,
@@ -566,3 +568,373 @@ def get_application_window_status(app_id: str) -> dict[str, Any]:
         "is_active": is_active,
         "message": f"**{app.display_name}** has {count} open window(s) ({state_str}){active_tag}.",
     }
+
+
+# =====================================================================
+# STEP 11: CONTROLLED WINDOW MANAGEMENT
+# =====================================================================
+
+# SW constants for ShowWindow / ShowWindowAsync
+_SW_MINIMIZE = 6
+_SW_MAXIMIZE = 3
+_SW_RESTORE = 9
+_SW_SHOW = 5
+
+# Window management action types
+_WINDOW_MANAGEMENT_TOOLS = frozenset({
+    "focus_application_window",
+    "minimize_application_window",
+    "maximize_application_window",
+    "restore_application_window",
+})
+
+# Short-lived window token store (module-level)
+_window_tokens: dict[str, "WindowToken"] = {}
+
+
+@dataclass
+class WindowToken:
+    """Short-lived opaque window selection token bound to verified identity."""
+
+    app_id: str
+    hwnd: int               # Only used internally for quick lookup; re-validated at execution
+    pid: int                # Captured PID for identity verification
+    state: WindowState
+    label: str              # e.g. "Visual Studio Code — Window 1"
+    created_at: float       # time.time()
+
+    TOKEN_TTL_SECONDS: ClassVar[float] = 300.0  # 5 minutes
+
+    def is_expired(self) -> bool:
+        return (time.time() - self.created_at) > self.TOKEN_TTL_SECONDS
+
+
+def _make_token_id() -> str:
+    """Generate an 8-char hex token ID using high-entropy random bytes."""
+    import os as _os
+    return _os.urandom(4).hex()
+
+
+def _purge_expired_tokens() -> None:
+    """Remove expired entries from the global token store."""
+    expired = [tid for tid, tok in _window_tokens.items() if tok.is_expired()]
+    for tid in expired:
+        _window_tokens.pop(tid, None)
+
+
+def create_window_tokens(app_id: str, windows: list[WindowInfo]) -> list[dict]:
+    """Create labeled selection options with short-lived tokens for multi-window apps."""
+    _purge_expired_tokens()
+    options = []
+    for idx, win in enumerate(windows, start=1):
+        token_id = _make_token_id()
+        label = f"{win.display_name} \u2014 Window {idx}"
+        tok = WindowToken(
+            app_id=app_id,
+            hwnd=win.hwnd,
+            pid=getattr(win, "_pid", 0),
+            state=win.state,
+            label=label,
+            created_at=time.time(),
+        )
+        _window_tokens[token_id] = tok
+        options.append({
+            "token_id": token_id,
+            "label": label,
+            "state": win.state,
+        })
+    return options
+
+
+def resolve_window_token(token_id: str, app_id: str) -> tuple[WindowInfo | None, str | None]:
+    """Resolve a token to a re-verified WindowInfo, or return error message.
+
+    Returns (WindowInfo, None) on success or (None, error_message) on failure.
+    """
+    _purge_expired_tokens()
+
+    tok = _window_tokens.get(token_id)
+    if not tok:
+        return None, "Window selection token not found or has expired."
+
+    if tok.app_id != app_id:
+        return None, "Window selection token does not match the requested application."
+
+    if tok.is_expired():
+        _window_tokens.pop(token_id, None)
+        return None, "Window selection token has expired. Please retry the operation."
+
+    # Re-enumerate windows to find one matching both hwnd and pid
+    try:
+        all_windows = _enumerate_windows_native()
+    except Exception as err:
+        logger.error("Failed to re-enumerate windows during token resolution: %s", err)
+        return None, "Desktop inspection temporarily unavailable."
+
+    # Verify hwnd is still valid
+    if sys.platform == "win32":
+        import ctypes
+        user32 = ctypes.windll.user32
+        if not user32.IsWindow(tok.hwnd):
+            _window_tokens.pop(token_id, None)
+            return None, "The target window is no longer available."
+
+    # Find window with matching hwnd AND app_id; verify PID if stored
+    for win in all_windows:
+        if win.hwnd == tok.hwnd and win.app_id == app_id:
+            if tok.pid:
+                pid, _ = _get_real_window_process_info(win.hwnd)
+                if pid != tok.pid:
+                    _window_tokens.pop(token_id, None)
+                    return None, "The target window process identity has changed."
+            return win, None
+
+    _window_tokens.pop(token_id, None)
+    return None, "The target window is no longer available."
+
+
+def _get_single_app_window(app_id: str) -> tuple[WindowInfo | None, list[WindowInfo], str | None]:
+    """Return (single_window_or_None, all_windows_for_app, error_message_or_None).
+
+    If there's exactly one window → (win, [win], None).
+    If there are multiple → (None, [win1, win2, ...], None).
+    If there are none → (None, [], error_message).
+    """
+    try:
+        all_windows = _enumerate_windows_native()
+    except Exception as err:
+        logger.error("Failed to enumerate windows for %s: %s", app_id, err)
+        return None, [], "Desktop inspection temporarily unavailable."
+
+    app_windows = [w for w in all_windows if w.app_id == app_id]
+    if not app_windows:
+        approved = get_approved_apps()
+        disp = approved[app_id].display_name if app_id in approved else app_id
+        return None, [], f"{disp} does not have any open windows."
+
+    if len(app_windows) == 1:
+        return app_windows[0], app_windows, None
+
+    return None, app_windows, None
+
+
+def _verify_and_act_on_window(
+    hwnd: int,
+    app_id: str,
+    action: str,
+) -> dict[str, Any]:
+    """Execute a ShowWindow(Async)/SetForegroundWindow call and verify the result.
+
+    Args:
+        hwnd: validated window handle
+        app_id: approved app_id for the window
+        action: one of "focus", "minimize", "maximize", "restore"
+
+    Returns a dict with at least {"success": bool, ...}.
+    """
+    if sys.platform != "win32":
+        return {"success": False, "error": "Window management is only available on Windows."}
+
+    import ctypes
+    user32 = ctypes.windll.user32
+
+    approved = get_approved_apps()
+    disp = approved[app_id].display_name if app_id in approved else app_id
+
+    if action == "focus":
+        # If minimized, restore first so it can receive focus
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, _SW_RESTORE)
+
+        result = user32.SetForegroundWindow(hwnd)
+        fg = user32.GetForegroundWindow()
+
+        if fg == hwnd:
+            return {
+                "success": True,
+                "app_id": app_id,
+                "display_name": disp,
+                "message": f"{disp} is now in the foreground.",
+            }
+        else:
+            return {
+                "success": False,
+                "app_id": app_id,
+                "display_name": disp,
+                "error": "Windows prevented the focus change.",
+            }
+
+    elif action == "minimize":
+        if user32.IsIconic(hwnd):
+            return {
+                "success": True,
+                "app_id": app_id,
+                "display_name": disp,
+                "message": f"{disp} is already minimized.",
+                "note": "already_in_state",
+            }
+
+        user32.ShowWindowAsync(hwnd, _SW_MINIMIZE)
+        # Poll up to 5 times × 60ms = 300ms
+        for _ in range(5):
+            time.sleep(0.06)
+            if user32.IsIconic(hwnd):
+                return {
+                    "success": True,
+                    "app_id": app_id,
+                    "display_name": disp,
+                    "message": f"{disp} has been minimized.",
+                }
+        return {
+            "success": False,
+            "app_id": app_id,
+            "display_name": disp,
+            "error": f"Failed to verify that {disp} was minimized.",
+        }
+
+    elif action == "maximize":
+        if user32.IsZoomed(hwnd) and not user32.IsIconic(hwnd):
+            return {
+                "success": True,
+                "app_id": app_id,
+                "display_name": disp,
+                "message": f"{disp} is already maximized.",
+                "note": "already_in_state",
+            }
+
+        user32.ShowWindowAsync(hwnd, _SW_MAXIMIZE)
+        for _ in range(5):
+            time.sleep(0.06)
+            if user32.IsZoomed(hwnd) and not user32.IsIconic(hwnd):
+                return {
+                    "success": True,
+                    "app_id": app_id,
+                    "display_name": disp,
+                    "message": f"{disp} has been maximized.",
+                }
+        return {
+            "success": False,
+            "app_id": app_id,
+            "display_name": disp,
+            "error": f"Failed to verify that {disp} was maximized.",
+        }
+
+    elif action == "restore":
+        if not user32.IsIconic(hwnd) and not user32.IsZoomed(hwnd):
+            return {
+                "success": True,
+                "app_id": app_id,
+                "display_name": disp,
+                "message": f"{disp} is already in Normal state.",
+                "note": "already_in_state",
+            }
+
+        user32.ShowWindowAsync(hwnd, _SW_RESTORE)
+        for _ in range(5):
+            time.sleep(0.06)
+            if not user32.IsIconic(hwnd) and not user32.IsZoomed(hwnd):
+                return {
+                    "success": True,
+                    "app_id": app_id,
+                    "display_name": disp,
+                    "message": f"{disp} has been restored to Normal.",
+                }
+        return {
+            "success": False,
+            "app_id": app_id,
+            "display_name": disp,
+            "error": f"Failed to verify that {disp} was restored to Normal state.",
+        }
+
+    return {"success": False, "error": f"Unknown window action: {action}"}
+
+
+def _window_management_core(
+    app_id: str,
+    window_token: str | None,
+    action: str,
+) -> dict[str, Any]:
+    """Shared implementation for all 4 window management tools.
+
+    Enforces:
+    - app_id is in the approved allowlist
+    - Platform is Windows
+    - Window re-enumeration and identity re-validation at execution time
+    - Token expiry and stale-window detection
+    """
+    if sys.platform != "win32":
+        return {"success": False, "error": "Window management is only available on Windows."}
+
+    resolved_id = resolve_app_alias(app_id)
+    approved = get_approved_apps()
+
+    if not resolved_id or resolved_id not in approved:
+        return {
+            "success": False,
+            "error": f"Application '{app_id}' is not in the approved application allowlist.",
+        }
+
+    disp = approved[resolved_id].display_name
+
+    # Token-based path: resolve token to a specific window
+    if window_token:
+        win, err = resolve_window_token(window_token, resolved_id)
+        if err:
+            return {"success": False, "error": err}
+        if win is None:
+            return {"success": False, "error": "The target window is no longer available."}
+        return _verify_and_act_on_window(win.hwnd, resolved_id, action)
+
+    # No token: enumerate and find target window(s)
+    single_win, app_windows, enum_err = _get_single_app_window(resolved_id)
+
+    if enum_err:
+        return {"success": False, "error": enum_err}
+
+    if not app_windows:
+        return {"success": False, "error": f"{disp} does not have any open windows."}
+
+    # Multiple windows — need selection
+    if len(app_windows) > 1:
+        options = create_window_tokens(resolved_id, app_windows)
+        return {
+            "success": False,
+            "requires_selection": True,
+            "app_id": resolved_id,
+            "display_name": disp,
+            "windows": options,
+        }
+
+    # Exactly one window
+    return _verify_and_act_on_window(single_win.hwnd, resolved_id, action)
+
+
+# =====================================================================
+# PUBLIC WINDOW MANAGEMENT TOOLS (Step 11)
+# =====================================================================
+
+def focus_application_window(app_id: str, window_token: str | None = None) -> dict[str, Any]:
+    """Bring an approved application window to the foreground.
+
+    Requires confirmed re-enumeration before acting. Reports accurate success/failure.
+    Never operates on unapproved applications or leaks process details.
+    """
+    return _window_management_core(app_id, window_token, "focus")
+
+
+def minimize_application_window(app_id: str, window_token: str | None = None) -> dict[str, Any]:
+    """Minimize an approved application window. Verifies state afterward."""
+    return _window_management_core(app_id, window_token, "minimize")
+
+
+def maximize_application_window(app_id: str, window_token: str | None = None) -> dict[str, Any]:
+    """Maximize an approved application window. Verifies state afterward."""
+    return _window_management_core(app_id, window_token, "maximize")
+
+
+def restore_application_window(app_id: str, window_token: str | None = None) -> dict[str, Any]:
+    """Restore a minimized/maximized approved application window to Normal state.
+
+    Verifies state afterward. Never claims success if the final state does not confirm.
+    """
+    return _window_management_core(app_id, window_token, "restore")
