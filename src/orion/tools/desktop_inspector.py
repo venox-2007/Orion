@@ -718,6 +718,60 @@ def _get_single_app_window(app_id: str) -> tuple[WindowInfo | None, list[WindowI
     return None, app_windows, None
 
 
+def _is_target_window_foreground(fg_hwnd: int, target_hwnd: int, app_id: str) -> bool:
+    """Verify strictly whether the actual foreground window matches the target window.
+
+    Accounts for:
+    - Direct handle match (fg_hwnd == target_hwnd)
+    - Root ancestor match via GA_ROOT (e.g. child control or CoreWindow in ApplicationFrameHost)
+    - Direct child relationship via IsChild
+    - Reverse child relationship (in case target_hwnd is a child and fg_hwnd is top-level frame)
+    - Strict rejection if foreground belongs to any other window or application
+    """
+    if not fg_hwnd or not target_hwnd:
+        return False
+
+    if fg_hwnd == target_hwnd:
+        return True
+
+    if sys.platform != "win32":
+        return False
+
+    import ctypes
+    user32 = ctypes.windll.user32
+    GA_ROOT = 2
+
+    try:
+        # Check root ancestor match (e.g. child CoreWindow inside top-level frame)
+        if hasattr(user32, "GetAncestor"):
+            fg_root = user32.GetAncestor(fg_hwnd, GA_ROOT)
+            target_root = user32.GetAncestor(target_hwnd, GA_ROOT)
+
+            if isinstance(fg_root, int) and not isinstance(fg_root, bool) and fg_root != 0:
+                if fg_root == target_hwnd:
+                    return True
+                if isinstance(target_root, int) and not isinstance(target_root, bool) and target_root != 0:
+                    if fg_root == target_root:
+                        return True
+
+            if isinstance(target_root, int) and not isinstance(target_root, bool) and target_root != 0:
+                if target_root == fg_hwnd:
+                    return True
+
+        # Check child relationship via IsChild
+        if hasattr(user32, "IsChild"):
+            is_child_res = user32.IsChild(target_hwnd, fg_hwnd)
+            if isinstance(is_child_res, (int, bool)) and is_child_res not in (0, False):
+                return True
+            is_child_rev = user32.IsChild(fg_hwnd, target_hwnd)
+            if isinstance(is_child_rev, (int, bool)) and is_child_rev not in (0, False):
+                return True
+    except Exception as err:
+        logger.debug("Error checking window relationship: %s", err)
+
+    return False
+
+
 def _verify_and_act_on_window(
     hwnd: int,
     app_id: str,
@@ -745,11 +799,20 @@ def _verify_and_act_on_window(
         # If minimized, restore first so it can receive focus
         if user32.IsIconic(hwnd):
             user32.ShowWindow(hwnd, _SW_RESTORE)
+            time.sleep(0.05)
 
-        result = user32.SetForegroundWindow(hwnd)
-        fg = user32.GetForegroundWindow()
+        user32.SetForegroundWindow(hwnd)
 
-        if fg == hwnd:
+        # Bounded verification window (up to ~300ms) for delayed foreground transitions
+        focused = False
+        for _ in range(6):
+            fg = _get_foreground_hwnd_native()
+            if fg and _is_target_window_foreground(fg, hwnd, app_id):
+                focused = True
+                break
+            time.sleep(0.05)
+
+        if focused:
             return {
                 "success": True,
                 "app_id": app_id,
@@ -761,7 +824,7 @@ def _verify_and_act_on_window(
                 "success": False,
                 "app_id": app_id,
                 "display_name": disp,
-                "error": "Windows prevented the focus change.",
+                "error": f"{disp} was not brought to the foreground. Windows may have blocked the focus change.",
             }
 
     elif action == "minimize":

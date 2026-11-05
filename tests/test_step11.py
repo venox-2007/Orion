@@ -593,3 +593,186 @@ def test_non_windows_platform_guard():
     with patch("sys.platform", "linux"):
         result2 = minimize_application_window("notepad")
     assert result2["success"] is False
+
+
+# ---------------------------------------------------------------------------
+# Step 11 Hotfix Tests: Focus Verification & Packaged App Windows
+# ---------------------------------------------------------------------------
+
+def test_calculator_packaged_window_identity_focus_success():
+    """Calculator child CoreWindow (0x4001) in ApplicationFrameWindow (0x4000) verified via root ancestor."""
+    top_hwnd = 0x4000
+    child_hwnd = 0x4001
+    win = _make_win(top_hwnd, "calculator", "Normal")
+
+    mock_user32 = MagicMock()
+    mock_user32.IsIconic.return_value = False
+    mock_user32.SetForegroundWindow.return_value = 1
+    mock_user32.GetForegroundWindow.return_value = child_hwnd
+    mock_user32.GetAncestor.side_effect = lambda hwnd, ga_root: top_hwnd if hwnd == child_hwnd else hwnd
+    mock_user32.IsChild.side_effect = lambda parent, child: 1 if parent == top_hwnd and child == child_hwnd else 0
+
+    with patch("orion.tools.desktop_inspector._enumerate_windows_native", return_value=[win]), \
+         patch("sys.platform", "win32"), \
+         patch("ctypes.windll") as mock_windll, \
+         patch("time.sleep"):
+        mock_windll.user32 = mock_user32
+        result = focus_application_window("calculator")
+
+    assert result["success"] is True
+    assert "Calculator" in result["message"]
+    assert "foreground" in result["message"].lower()
+
+
+def test_calculator_blocked_set_foreground_window():
+    """When Windows blocks foreground activation for Calculator, report honest failure."""
+    top_hwnd = 0x4000
+    win = _make_win(top_hwnd, "calculator", "Normal")
+
+    other_app_hwnd = 0x8888  # e.g. VS Code currently in foreground
+    mock_user32 = MagicMock()
+    mock_user32.IsIconic.return_value = False
+    mock_user32.SetForegroundWindow.return_value = 0  # Windows blocked
+    mock_user32.GetForegroundWindow.return_value = other_app_hwnd
+    mock_user32.GetAncestor.side_effect = lambda hwnd, ga_root: hwnd
+    mock_user32.IsChild.return_value = 0
+
+    with patch("orion.tools.desktop_inspector._enumerate_windows_native", return_value=[win]), \
+         patch("sys.platform", "win32"), \
+         patch("ctypes.windll") as mock_windll, \
+         patch("time.sleep"):
+        mock_windll.user32 = mock_user32
+        result = focus_application_window("calculator")
+
+    assert result["success"] is False
+    assert "Calculator was not brought to the foreground" in result["error"]
+    assert "blocked the focus change" in result["error"]
+
+
+def test_foreground_window_differing_from_target():
+    """Target window is Notepad, but another window remains foreground."""
+    notepad_hwnd = 0x3000
+    other_hwnd = 0x5000
+    win = _make_win(notepad_hwnd, "notepad", "Normal")
+
+    mock_user32 = MagicMock()
+    mock_user32.IsIconic.return_value = False
+    mock_user32.SetForegroundWindow.return_value = 1
+    mock_user32.GetForegroundWindow.return_value = other_hwnd
+    mock_user32.GetAncestor.side_effect = lambda hwnd, ga_root: hwnd
+    mock_user32.IsChild.return_value = 0
+
+    with patch("orion.tools.desktop_inspector._enumerate_windows_native", return_value=[win]), \
+         patch("sys.platform", "win32"), \
+         patch("ctypes.windll") as mock_windll, \
+         patch("time.sleep"):
+        mock_windll.user32 = mock_user32
+        result = focus_application_window("notepad")
+
+    assert result["success"] is False
+    assert "Notepad was not brought to the foreground" in result["error"]
+
+
+def test_maximize_succeeds_without_claiming_focus():
+    """Maximizing Calculator succeeds without claiming focus or foreground."""
+    calc_hwnd = 0x4000
+    win = _make_win(calc_hwnd, "calculator", "Normal")
+
+    mock_user32 = MagicMock()
+    # IsZoomed transitions from False to True, IsIconic remains False
+    mock_user32.IsIconic.return_value = False
+    mock_user32.IsZoomed.side_effect = [False, True]
+    mock_user32.ShowWindowAsync.return_value = 1
+    # Foreground window is something else (e.g. VS Code)
+    mock_user32.GetForegroundWindow.return_value = 0x8888
+
+    with patch("orion.tools.desktop_inspector._enumerate_windows_native", return_value=[win]), \
+         patch("sys.platform", "win32"), \
+         patch("ctypes.windll") as mock_windll, \
+         patch("time.sleep"):
+        mock_windll.user32 = mock_user32
+        res_max = maximize_application_window("calculator")
+
+    assert res_max["success"] is True
+    assert "maximized" in res_max["message"].lower()
+    # Ensure it did NOT claim to be in the foreground
+    assert "foreground" not in res_max["message"].lower()
+
+
+def test_no_false_success_after_transition_timeout():
+    """Delayed foreground transition that never arrives times out and reports failure."""
+    target_hwnd = 0x2222
+    win = _make_win(target_hwnd, "edge", "Normal")
+
+    mock_user32 = MagicMock()
+    mock_user32.IsIconic.return_value = False
+    mock_user32.SetForegroundWindow.return_value = 1
+    # Returns 0x9999 on all polling attempts
+    mock_user32.GetForegroundWindow.return_value = 0x9999
+    mock_user32.GetAncestor.side_effect = lambda hwnd, ga_root: hwnd
+    mock_user32.IsChild.return_value = 0
+
+    sleep_calls = []
+    with patch("orion.tools.desktop_inspector._enumerate_windows_native", return_value=[win]), \
+         patch("sys.platform", "win32"), \
+         patch("ctypes.windll") as mock_windll, \
+         patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+        mock_windll.user32 = mock_user32
+        result = focus_application_window("edge")
+
+    assert result["success"] is False
+    assert len(sleep_calls) == 6  # Verified bounded polling window
+    assert "Microsoft Edge was not brought to the foreground" in result["error"]
+
+
+def test_tool_result_formatting_blocked_focus():
+    """format_tool_result cleanly surfaces the honest focus failure message."""
+    fail_res = {
+        "success": False,
+        "error": "Calculator was not brought to the foreground. Windows may have blocked the focus change.",
+        "data": {
+            "success": False,
+            "error": "Calculator was not brought to the foreground. Windows may have blocked the focus change.",
+        },
+    }
+    msg = format_tool_result("focus_application_window", fail_res)
+    assert msg == "Calculator was not brought to the foreground. Windows may have blocked the focus change."
+    assert "Unable to complete request:" not in msg
+
+
+def test_registry_and_history_record_focus_failure_accurately(step11_env):
+    """ToolRegistry and action history accurately reflect failed focus."""
+    memory: ConversationMemory = step11_env["memory"]
+    registry = ToolRegistry()
+    owner_id = 12345
+
+    # Mock tool function returning failure
+    mock_focus_fail = MagicMock(return_value={
+        "success": False,
+        "app_id": "calculator",
+        "display_name": "Calculator",
+        "error": "Calculator was not brought to the foreground. Windows may have blocked the focus change.",
+    })
+
+    with patch.dict(registry._tools, {"focus_application_window": MagicMock(
+        args_schema=registry._tools["focus_application_window"].args_schema,
+        func=mock_focus_fail,
+    )}):
+        exec_result = registry.execute("focus_application_window", {"app_id": "calculator"})
+
+    assert exec_result["success"] is False
+    assert "blocked the focus change" in exec_result["error"]
+
+    # Log to memory as failed
+    memory.log_action_history(
+        user_id=owner_id,
+        action_type="focus_application_window",
+        payload={"app_id": "calculator"},
+        status="failed",
+        result=exec_result,
+    )
+
+    history = memory.get_unified_history(owner_id, limit=5)
+    assert len(history) == 1
+    assert history[0]["status"] == "failed"
+

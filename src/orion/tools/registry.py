@@ -316,6 +316,13 @@ class ToolRegistry:
             args_dict = validated_args.model_dump()
             result = tool.func(**args_dict)
             logger.info("Executed tool %s successfully", name)
+            if isinstance(result, dict) and result.get("success") is False:
+                return {
+                    "success": False,
+                    "tool": name,
+                    "error": result.get("error", "Tool execution failed."),
+                    "data": result,
+                }
             return {"success": True, "tool": name, "data": result}
         except ValidationError as err:
             logger.warning("Validation error for tool %s: %s", name, err)

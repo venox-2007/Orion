@@ -198,7 +198,7 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
         lines.append("\nReply with the window management action and the token, e.g.:\n`minimize vscode window_token: <token_id>`")
         return "\n".join(lines)
 
-    if not result.get("success"):
+    if not result.get("success") or (isinstance(data, dict) and data.get("success") is False):
         error_msg = result.get("error") or data.get("error", "Unknown error")
         lower_err = error_msg.lower()
         if "already exists" in lower_err:
@@ -217,7 +217,16 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
             return "Cannot proceed: Only regular files can be processed."
         if "exceeds maximum" in lower_err:
             return "Cannot proceed: File content exceeds the maximum allowed size limit (1 MB)."
-        if "application unavailable" in lower_err:
+        if (
+            "blocked" in lower_err
+            or "prevented" in lower_err
+            or "not brought to the foreground" in lower_err
+            or "failed to verify" in lower_err
+            or "no longer available" in lower_err
+            or "does not have any open windows" in lower_err
+            or "application unavailable" in lower_err
+            or "not in the approved" in lower_err
+        ):
             return error_msg
         return f"Unable to complete request: {error_msg}"
 

@@ -919,7 +919,11 @@ def create_telegram_app(
                         await query.edit_message_text(f"Window selection failed: no options available.")
                     return
 
-                status_str = "success" if exec_result.get("success") else "failed"
+                is_successful = (
+                    exec_result.get("success", False)
+                    and (not isinstance(tool_data, dict) or tool_data.get("success", True) is not False)
+                )
+                status_str = "success" if is_successful else "failed"
 
                 conv_memory.log_action_history(
                     user_id=owner_id,
