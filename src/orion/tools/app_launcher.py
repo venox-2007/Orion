@@ -468,16 +468,33 @@ def resolve_app_alias(query: str) -> str | None:
     if any(ch in query for ch in (";", "&", "|", "`", "$", "<", ">", "\\", "/", ":", "\n", "\r")):
         return None
 
+    # Strip conversational prefixes: "the ", "my "
+    clean = re.sub(r"^(?:the\s+|my\s+)", "", clean).strip()
+
+    # Strip common suffixes: " app", " application", " program", " window", " windows"
+    clean = re.sub(r"\s+(?:app|application|program|window|windows)$", "", clean).strip()
+
     # Direct match on app_id
     if clean in APPROVED_APPLICATIONS:
         return clean
 
-    # Match aliases
+    # Match aliases and display names (exact)
     for app_id, app in APPROVED_APPLICATIONS.items():
         if clean == app.display_name.lower():
             return app_id
         for alias in app.aliases:
             if clean == alias.lower():
+                return app_id
+
+    # Normalized space match (e.g. "vs code" vs "vscode")
+    clean_nospace = clean.replace(" ", "")
+    for app_id, app in APPROVED_APPLICATIONS.items():
+        if clean_nospace == app.app_id.replace("_", ""):
+            return app_id
+        if clean_nospace == app.display_name.lower().replace(" ", ""):
+            return app_id
+        for alias in app.aliases:
+            if clean_nospace == alias.lower().replace(" ", ""):
                 return app_id
 
     # Substring match only if clean is a substring of display_name or an alias
@@ -730,3 +747,155 @@ def launch_application(app_id: str) -> dict[str, Any]:
             "display_name": app.display_name,
             "error": f"Failed to launch {app.display_name}: {type(err).__name__}",
         }
+
+
+def _get_short_display_name(app_id: str) -> str:
+    """Return natural short display name for notifications (e.g. 'VS Code')."""
+    if app_id == "vscode":
+        return "VS Code"
+    if app_id == "file_explorer":
+        return "File Explorer"
+    approved = get_approved_apps()
+    if app_id in approved:
+        return approved[app_id].display_name
+    return app_id
+
+
+def execute_composite_app_action(
+    command_type: str,
+    app_ids: list[str] | None = None,
+    target_app_id: str | None = None,
+    window_action: str | None = None,
+    summary: str = "Application action",
+    display_names: list[str] | None = None,
+    display_name: str | None = None,
+    actions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Execute multiple application launches or sequential launch-and-window actions.
+
+    Executes each action sequentially, verifies individual outcomes, and returns
+    a concise, natural combined message.
+    """
+    import time
+    approved = get_approved_apps()
+
+    if command_type == "multi_launch":
+        app_ids = app_ids or []
+        succeeded: list[str] = []
+        failed: list[str] = []
+
+        for aid in app_ids:
+            if aid not in approved:
+                failed.append(aid)
+                continue
+
+            app = approved[aid]
+            disp = _get_short_display_name(aid)
+            is_avail, _, _ = is_app_available(aid)
+            if not is_avail:
+                failed.append(disp)
+                continue
+
+            res = launch_application(aid)
+            if res.get("success"):
+                succeeded.append(disp)
+            else:
+                failed.append(disp)
+
+        def _join_names(names: list[str], conj: str = "and") -> str:
+            if not names:
+                return ""
+            if len(names) == 1:
+                return names[0]
+            if len(names) == 2:
+                return f"{names[0]} {conj} {names[1]}"
+            return f"{', '.join(names[:-1])} {conj} {names[-1]}"
+
+        if succeeded and not failed:
+            msg = f"Opened {_join_names(succeeded)}."
+        elif succeeded and failed:
+            msg = f"Opened {_join_names(succeeded)}, but couldn't launch {_join_names(failed, 'or')}."
+        else:
+            msg = f"Couldn't launch {_join_names(failed, 'or')}."
+
+        return {
+            "success": len(succeeded) > 0,
+            "message": msg,
+            "succeeded": succeeded,
+            "failed": failed,
+        }
+
+    elif command_type == "launch_and_window":
+        target = target_app_id or (app_ids[0] if app_ids else None)
+        if not target or target not in approved:
+            return {"success": False, "error": f"Application '{target}' is not approved."}
+
+        disp = _get_short_display_name(target)
+
+        # 1. Launch the application
+        is_avail, _, _ = is_app_available(target)
+        if not is_avail:
+            return {"success": False, "message": f"Couldn't launch {disp}."}
+
+        launch_res = launch_application(target)
+        if not launch_res.get("success"):
+            return {"success": False, "message": f"Couldn't launch {disp}."}
+
+        # 2. Wait briefly for window to appear on desktop (up to ~1.5s)
+        from orion.tools.desktop_inspector import (
+            _enumerate_windows_native,
+            focus_application_window,
+            maximize_application_window,
+            minimize_application_window,
+            restore_application_window,
+        )
+
+        win_found = False
+        for _ in range(5):
+            try:
+                wins = _enumerate_windows_native()
+                if any(w.app_id == target for w in wins):
+                    win_found = True
+                    break
+            except Exception:
+                pass
+            time.sleep(0.3)
+
+        # 3. Perform the requested window action
+        win_res: dict[str, Any] = {"success": False}
+        act_map = {
+            "maximize": maximize_application_window,
+            "minimize": minimize_application_window,
+            "focus": focus_application_window,
+            "restore": restore_application_window,
+        }
+        fn = act_map.get(window_action or "maximize")
+        if fn:
+            win_res = fn(target)
+
+        # 4. Natural response formatting
+        verb_success = {
+            "maximize": "maximized",
+            "minimize": "minimized",
+            "focus": "brought it to the foreground",
+            "restore": "restored",
+        }.get(window_action, "managed")
+
+        verb_fail = {
+            "maximize": "maximize it",
+            "minimize": "minimize it",
+            "focus": "bring it to the foreground",
+            "restore": "restore it",
+        }.get(window_action, "manage it")
+
+        if win_res.get("success"):
+            if window_action in ("maximize", "minimize", "restore"):
+                msg = f"Opened and {verb_success} {disp}."
+            else:
+                msg = f"Opened {disp} and {verb_success}."
+            return {"success": True, "message": msg}
+        else:
+            msg = f"Opened {disp}, but couldn't {verb_fail}."
+            return {"success": True, "partial": True, "message": msg}
+
+    return {"success": False, "error": f"Unknown command type: {command_type}"}

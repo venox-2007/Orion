@@ -17,6 +17,7 @@ _ACTION_TYPE_DISPLAY = {
     "maximize_application_window": "Maximize window",
     "restore_application_window": "Restore window",
     "launch_application": "Launch application",
+    "composite_app_action": "Application action",
 }
 
 _WINDOW_MANAGEMENT_ACTION_TYPES = frozenset({
@@ -752,7 +753,10 @@ class ConversationMemory:
                 payload = {}
             act_type = row_act[1]
             status_val = row_act[2]
-            if act_type == "launch_application":
+            if act_type == "composite_app_action":
+                summary = payload.get("summary", "Application action")
+                status_out = status_val
+            elif act_type == "launch_application":
                 from orion.tools.app_launcher import get_approved_apps
 
                 app_id = payload.get("app_id", "")
@@ -841,7 +845,10 @@ class ConversationMemory:
             except Exception:
                 payload = {}
 
-            if act_type == "launch_application":
+            if act_type == "composite_app_action":
+                summary = payload.get("summary", "Application action")
+                status_str = status_val
+            elif act_type == "launch_application":
                 from orion.tools.app_launcher import get_approved_apps
 
                 app_id = payload.get("app_id", "")

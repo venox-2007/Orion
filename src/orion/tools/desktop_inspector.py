@@ -796,11 +796,14 @@ def _verify_and_act_on_window(
     disp = approved[app_id].display_name if app_id in approved else app_id
 
     if action == "focus":
-        # If minimized, restore first so it can receive focus
+        # Handle minimized windows by restoring them first so they can receive focus
         if user32.IsIconic(hwnd):
             user32.ShowWindow(hwnd, _SW_RESTORE)
             time.sleep(0.05)
 
+        # Attempt safe foreground activation
+        if hasattr(user32, "BringWindowToTop"):
+            user32.BringWindowToTop(hwnd)
         user32.SetForegroundWindow(hwnd)
 
         # Bounded verification window (up to ~300ms) for delayed foreground transitions
@@ -856,6 +859,11 @@ def _verify_and_act_on_window(
         }
 
     elif action == "maximize":
+        # Handle minimized windows by restoring them first before maximizing
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, _SW_RESTORE)
+            time.sleep(0.05)
+
         if user32.IsZoomed(hwnd) and not user32.IsIconic(hwnd):
             return {
                 "success": True,

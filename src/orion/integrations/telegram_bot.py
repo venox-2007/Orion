@@ -517,6 +517,14 @@ def create_telegram_app(
                             status="cancelled",
                         )
                         cancel_msg = "Pending window operation cancelled. No changes were made."
+                    elif act_type == "composite_app_action":
+                        conv_memory.log_action_history(
+                            user_id=owner_id,
+                            action_type=act_type,
+                            payload=item["payload"],
+                            status="cancelled",
+                        )
+                        cancel_msg = "Pending application actions were cancelled. No applications were launched."
                     else:
                         name = act_type.replace("_", " ").title()
                         cancel_msg = f"Pending task `{name}` has been cancelled. No filesystem changes were made."
@@ -830,6 +838,8 @@ def create_telegram_app(
                         cancel_msg = "❌ Operation cancelled. No application was launched."
                     elif act and act.get("action_type") in _WINDOW_MANAGEMENT_ACTION_TYPES:
                         cancel_msg = "❌ Pending window operation cancelled. No changes were made."
+                    elif act and act.get("action_type") == "composite_app_action":
+                        cancel_msg = "❌ Operation cancelled. No applications were launched."
                     else:
                         cancel_msg = "❌ Operation cancelled. No filesystem changes were made."
                     html_cancel = markdown_to_telegram_html(cancel_msg)

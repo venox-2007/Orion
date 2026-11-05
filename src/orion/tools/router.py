@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from orion.integrations.ollama import OllamaClient
 
 from orion.tools.app_launcher import (
+    _get_short_display_name,
     get_approved_apps,
     is_app_available,
     is_app_blocked,
@@ -160,6 +161,11 @@ def format_action_proposal(tool_name: str, args: dict[str, Any]) -> str:
             f"Launch **{display_name}** on your laptop?\n\n"
             "*Confirm to launch the application.*"
         )
+    if tool_name == "composite_app_action":
+        return args.get(
+            "proposal_text",
+            "⚠️ **Action Confirmation Required**\n\nPlease confirm or cancel these application operations.",
+        )
     _WINDOW_ACTION_LABELS = {
         "focus_application_window": "Focus window",
         "minimize_application_window": "Minimize window",
@@ -307,6 +313,9 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
     if tool_name == "launch_application":
         disp = data.get("display_name", "Application")
         return f"🚀 Launch requested for **{disp}**."
+
+    if tool_name == "composite_app_action":
+        return data.get("message", "Application operations completed.")
 
     if tool_name == "list_open_windows":
         windows = data.get("open_windows", [])
@@ -490,8 +499,45 @@ def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
     return None
 
 
+def parse_sequential_command(raw_target: str) -> tuple[str, str] | None:
+    """Check if raw_target is '<app> then/and <window_action> [it]'.
+
+    Returns (app_candidate, normalized_action) or None.
+    e.g. ('calculator', 'maximize')
+    """
+    pattern = (
+        r"^(.+?)\s+(?:then\s+|and\s+then\s+|and\s+)"
+        r"(maximize|minimize|restore|focus|bring\s+(?:it\s+)?to\s+(?:the\s+)?(?:front|foreground)|bring\s+up)"
+        r"(?:\s+it)?[\s.!?]*$"
+    )
+    m = re.match(pattern, raw_target.strip(), re.IGNORECASE)
+    if m:
+        app_part = m.group(1).strip()
+        action_verb = m.group(2).strip().lower()
+        if "front" in action_verb or "foreground" in action_verb or "up" in action_verb:
+            norm_action = "focus"
+        elif "max" in action_verb:
+            norm_action = "maximize"
+        elif "min" in action_verb:
+            norm_action = "minimize"
+        elif "restore" in action_verb:
+            norm_action = "restore"
+        elif "focus" in action_verb:
+            norm_action = "focus"
+        else:
+            norm_action = action_verb
+        return app_part, norm_action
+    return None
+
+
+def parse_multi_app_targets(raw_target: str) -> list[str]:
+    """Split targets string by commas, 'and', '&' into individual app query candidates."""
+    parts = re.split(r",\s*(?:and\s+|&\s+)?|\s+(?:and|&)\s+", raw_target.strip(), flags=re.IGNORECASE)
+    return [p.strip() for p in parts if p.strip()]
+
+
 def check_deterministic_app_launch(clean_text: str) -> dict[str, Any] | None:
-    """Deterministically check if text is an imperative app launch or blocked app command.
+    """Deterministically check if text is an imperative app launch, multi-app, or blocked app command.
 
     Avoids false positives in ordinary conversation while providing instant, reliable
     routing for approved launch commands and instant rejection for blocked apps.
@@ -519,7 +565,111 @@ def check_deterministic_app_launch(clean_text: str) -> dict[str, Any] | None:
             "reply": "Which application would you like to launch? Send `/apps` to view the list of approved applications.",
         }
 
-    # 1. Check if known blocked application
+    # 1. Sequential command check: e.g. "open calculator then maximize it", "calc and maximize it"
+    seq = parse_sequential_command(raw_target)
+    if seq:
+        app_cand, norm_action = seq
+        blocked, reason = is_app_blocked(app_cand)
+        if blocked:
+            return {"handled": True, "reply": f"Application '{app_cand}' is not in the approved application allowlist. {reason}"}
+
+        app_id = resolve_app_alias(app_cand)
+        if not app_id:
+            return {
+                "handled": True,
+                "reply": f"Application '{app_cand}' is not in the approved application allowlist. ORION only has permission to launch 20 explicitly sanctioned applications. Send `/apps` to see the full list.",
+            }
+
+        disp = _get_short_display_name(app_id)
+        is_avail, _, _ = is_app_available(app_id)
+        if not is_avail:
+            return {"handled": True, "reply": f"Cannot launch {disp}: Application is not currently installed or available on this system."}
+
+        act_verb = {
+            "maximize": "maximize",
+            "minimize": "minimize",
+            "focus": "bring to the foreground",
+            "restore": "restore",
+        }.get(norm_action, norm_action)
+
+        proposal_text = (
+            "⚠️ **Action Confirmation Required**\n\n"
+            f"Launch and {act_verb} **{disp}** on your laptop?\n\n"
+            "*Confirm to proceed.*"
+        )
+        clean_args = {
+            "command_type": "launch_and_window",
+            "target_app_id": app_id,
+            "window_action": norm_action,
+            "summary": f"Launch and {act_verb} {disp}",
+            "display_name": disp,
+        }
+        return {
+            "handled": True,
+            "is_proposal": True,
+            "action_type": "composite_app_action",
+            "arguments": clean_args,
+            "proposal_text": proposal_text,
+        }
+
+    # 2. Multi-app launch check: e.g. "open calc and vs code", "launch notepad, calculator and explorer"
+    targets = parse_multi_app_targets(raw_target)
+    if len(targets) > 1:
+        # Check if any target is blocked
+        for t in targets:
+            blocked, reason = is_app_blocked(t)
+            if blocked:
+                return {"handled": True, "reply": f"Application '{t}' is not in the approved application allowlist. {reason}"}
+
+        # Resolve each target
+        resolved_ids: list[str] = []
+        for t in targets:
+            aid = resolve_app_alias(t)
+            if not aid:
+                return {
+                    "handled": True,
+                    "reply": f"Application '{t}' is not in the approved application allowlist. ORION only has permission to launch 20 explicitly sanctioned applications. Send `/apps` to see the full list.",
+                }
+            resolved_ids.append(aid)
+
+        display_names = [_get_short_display_name(aid) for aid in resolved_ids]
+
+        # Check availability
+        unavail: list[str] = []
+        for aid, disp in zip(resolved_ids, display_names):
+            is_avail, _, _ = is_app_available(aid)
+            if not is_avail:
+                unavail.append(disp)
+        if unavail:
+            return {"handled": True, "reply": f"Cannot launch {', '.join(unavail)}: Application is not currently installed or available on this system."}
+
+        if len(display_names) == 2:
+            joined_bold = f"**{display_names[0]}** and **{display_names[1]}**"
+            joined_plain = f"{display_names[0]} and {display_names[1]}"
+        else:
+            joined_bold = f"{', '.join(f'**{n}**' for n in display_names[:-1])}, and **{display_names[-1]}**"
+            joined_plain = f"{', '.join(display_names[:-1])} and {display_names[-1]}"
+
+        proposal_text = (
+            "⚠️ **Action Confirmation Required**\n\n"
+            f"Launch {joined_bold} on your laptop?\n\n"
+            "*Confirm to proceed.*"
+        )
+        clean_args = {
+            "command_type": "multi_launch",
+            "app_ids": resolved_ids,
+            "summary": f"Launch {joined_plain}",
+            "display_names": display_names,
+        }
+        return {
+            "handled": True,
+            "is_proposal": True,
+            "action_type": "composite_app_action",
+            "arguments": clean_args,
+            "proposal_text": proposal_text,
+        }
+
+    # 3. Single application: check if known blocked application
     blocked, reason = is_app_blocked(raw_target)
     if blocked:
         return {
@@ -527,7 +677,7 @@ def check_deterministic_app_launch(clean_text: str) -> dict[str, Any] | None:
             "reply": f"Application '{raw_target}' is not in the approved application allowlist. {reason}",
         }
 
-    # 2. Check if approved application alias
+    # 4. Check if approved application alias
     app_id = resolve_app_alias(raw_target)
     if app_id:
         app = get_approved_apps()[app_id]
@@ -548,7 +698,7 @@ def check_deterministic_app_launch(clean_text: str) -> dict[str, Any] | None:
             "proposal_text": proposal_text,
         }
 
-    # 3. If query looks like an unapproved app launch attempt
+    # 5. If query looks like an unapproved app launch attempt
     words = raw_target.split()
     if len(words) <= 4 and re.match(r"^[a-zA-Z0-9_\-\.\s]+$", raw_target):
         return {

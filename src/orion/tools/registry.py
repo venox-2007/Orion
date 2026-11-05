@@ -4,7 +4,7 @@ import logging
 from typing import Any, Callable
 from pydantic import BaseModel, Field, ValidationError
 
-from orion.tools.app_launcher import launch_application
+from orion.tools.app_launcher import execute_composite_app_action, launch_application
 from orion.tools.desktop_inspector import (
     focus_application_window,
     get_active_window,
@@ -101,6 +101,19 @@ class WindowManagementArgs(BaseModel):
 
     app_id: str = Field(min_length=1, max_length=50, description="Approved application ID")
     window_token: str | None = Field(default=None, max_length=100, description="Opaque window selection token for multi-window apps")
+
+
+class CompositeAppActionArgs(BaseModel):
+    """Schema for composite multi-application or sequential actions."""
+
+    command_type: str = Field(description="multi_launch or launch_and_window")
+    app_ids: list[str] = Field(default_factory=list, description="Approved application IDs to launch")
+    target_app_id: str | None = Field(default=None, description="Target app ID for sequential window action")
+    window_action: str | None = Field(default=None, description="Window action: maximize, minimize, restore, focus")
+    summary: str = Field(default="Application action", description="Human-readable summary")
+    display_names: list[str] = Field(default_factory=list)
+    display_name: str | None = Field(default=None)
+    actions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ToolDefinition:
@@ -257,6 +270,13 @@ class ToolRegistry:
             description="Restore a minimized/maximized approved application window to Normal state. Requires user confirmation.",
             args_schema=WindowManagementArgs,
             func=restore_application_window,
+            is_write_action=True,
+        )
+        self.register(
+            name="composite_app_action",
+            description="Execute multiple application launches or sequential window actions. Requires confirmation.",
+            args_schema=CompositeAppActionArgs,
+            func=execute_composite_app_action,
             is_write_action=True,
         )
 
