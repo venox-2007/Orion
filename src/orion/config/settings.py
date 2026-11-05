@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     # Tool & security configuration
     allowed_directories: str = ""
 
+    # Voice notes & speech-to-text configuration (Step 12)
+    voice_enabled: bool = True
+    whisper_model: str = "base"
+    whisper_device: str = "cpu"
+    whisper_compute_type: str = "int8"
+    whisper_download_root: str | None = None
+    max_voice_duration_seconds: int = 60
+    max_voice_file_size_bytes: int = 5 * 1024 * 1024  # 5 MB
+
     def get_allowed_directories(self) -> list[Path]:
         """Return list of canonical resolved allowed directory paths."""
         if not self.allowed_directories or not self.allowed_directories.strip():

@@ -1,6 +1,7 @@
 """Telegram bot integration for ORION using long polling."""
 
 import asyncio
+import logging
 import re
 from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -27,6 +28,9 @@ from orion.memory.database import ConversationMemory
 from orion.tools.app_launcher import get_approved_apps, is_app_available
 from orion.tools.registry import ToolRegistry, default_tool_registry
 from orion.tools.router import format_tool_result, route_and_execute_tool
+from orion.voice.transcriber import VoiceTranscriber
+
+logger = logging.getLogger("orion.integrations.telegram_bot")
 
 UNAUTHORIZED_MESSAGE = "Access restricted: unauthorized user or chat."
 WELCOME_MESSAGE = "Hello! I am ORION, your personal AI assistant. How can I help you today?"
@@ -116,6 +120,7 @@ def create_telegram_app(
     ollama_client: OllamaClient | None = None,
     memory: ConversationMemory | None = None,
     tool_registry: ToolRegistry | None = None,
+    transcriber: VoiceTranscriber | None = None,
 ) -> Application:
     """Build and configure the Telegram application with handlers."""
     client = ollama_client or OllamaClient()
@@ -123,6 +128,16 @@ def create_telegram_app(
     reg = tool_registry or default_tool_registry
     settings = get_settings()
     user_lock = asyncio.Lock()
+
+    # Initialize offline voice transcriber if enabled
+    voice_transcriber = transcriber
+    if voice_transcriber is None and settings.voice_enabled:
+        voice_transcriber = VoiceTranscriber(
+            model_size=settings.whisper_model,
+            device=settings.whisper_device,
+            compute_type=settings.whisper_compute_type,
+            download_root=settings.whisper_download_root,
+        )
 
     async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not is_authorized_owner(update, owner_id):
@@ -622,25 +637,7 @@ def create_telegram_app(
         reply_msg = format_tool_result("get_active_window", res)
         await send_formatted_message(update.effective_message, reply_msg)
 
-    async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not is_authorized_owner(update, owner_id):
-            if update.effective_message:
-                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
-            return
-
-        if not update.effective_message or not update.effective_message.text:
-            return
-
-        user_text = update.effective_message.text.strip()
-        if not user_text:
-            return
-
-        if update.effective_chat:
-            await context.bot.send_chat_action(
-                chat_id=update.effective_chat.id,
-                action=ChatAction.TYPING,
-            )
-
+    async def process_user_text(user_text: str, reply_target: Any) -> None:
         async with user_lock:
             # Check if user is replying with a choice to a pending window selection (e.g. "1", "2", "window 1")
             m_win_choice = re.match(r"^(?:window\s+)?([1-9])$", user_text, re.IGNORECASE)
@@ -667,9 +664,9 @@ def create_telegram_app(
                     ])
                     html_msg = markdown_to_telegram_html(proposal_text)
                     try:
-                        await update.effective_message.reply_text(html_msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                        await reply_target.reply_text(html_msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
                     except Exception:
-                        await update.effective_message.reply_text(clean_markdown_to_plain(proposal_text), reply_markup=keyboard)
+                        await reply_target.reply_text(clean_markdown_to_plain(proposal_text), reply_markup=keyboard)
                     conv_memory.add_message(owner_id, "user", user_text)
                     conv_memory.add_message(owner_id, "assistant", proposal_text)
                     return
@@ -695,13 +692,13 @@ def create_telegram_app(
                     )
                     html_msg = markdown_to_telegram_html(proposal_text)
                     try:
-                        await update.effective_message.reply_text(
+                        await reply_target.reply_text(
                             html_msg,
                             parse_mode=ParseMode.HTML,
                             reply_markup=keyboard,
                         )
                     except Exception:
-                        await update.effective_message.reply_text(
+                        await reply_target.reply_text(
                             clean_markdown_to_plain(proposal_text),
                             reply_markup=keyboard,
                         )
@@ -727,13 +724,13 @@ def create_telegram_app(
                     )
                     html_msg = markdown_to_telegram_html(proposal_text)
                     try:
-                        await update.effective_message.reply_text(
+                        await reply_target.reply_text(
                             html_msg,
                             parse_mode=ParseMode.HTML,
                             reply_markup=keyboard,
                         )
                     except Exception:
-                        await update.effective_message.reply_text(
+                        await reply_target.reply_text(
                             clean_markdown_to_plain(proposal_text),
                             reply_markup=keyboard,
                         )
@@ -756,7 +753,102 @@ def create_telegram_app(
                     conv_memory.add_message(owner_id, "user", user_text)
                     conv_memory.add_message(owner_id, "assistant", reply_text)
 
-        await send_formatted_message(update.effective_message, reply_text)
+        await send_formatted_message(reply_target, reply_text)
+
+    async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if not update.effective_message or not update.effective_message.text:
+            return
+
+        user_text = update.effective_message.text.strip()
+        if not user_text:
+            return
+
+        if update.effective_chat:
+            await context.bot.send_chat_action(
+                chat_id=update.effective_chat.id,
+                action=ChatAction.TYPING,
+            )
+
+        await process_user_text(user_text, update.effective_message)
+
+    async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle incoming Telegram voice notes with offline speech recognition."""
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if not update.effective_message or not update.effective_message.voice:
+            return
+
+        voice = update.effective_message.voice
+
+        if not settings.voice_enabled or voice_transcriber is None:
+            await send_formatted_message(
+                update.effective_message,
+                "Voice commands are currently disabled in ORION configuration.",
+            )
+            return
+
+        if voice.duration and voice.duration > settings.max_voice_duration_seconds:
+            await send_formatted_message(
+                update.effective_message,
+                f"Voice notes longer than {settings.max_voice_duration_seconds} seconds are not supported.",
+            )
+            return
+
+        if voice.file_size and voice.file_size > settings.max_voice_file_size_bytes:
+            await send_formatted_message(
+                update.effective_message,
+                "Voice note exceeds the maximum allowed file size.",
+            )
+            return
+
+        if update.effective_chat:
+            await context.bot.send_chat_action(
+                chat_id=update.effective_chat.id,
+                action=ChatAction.TYPING,
+            )
+
+        import os
+        import tempfile
+
+        temp_audio_file = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
+        temp_audio_path = temp_audio_file.name
+        temp_audio_file.close()
+
+        try:
+            voice_file = await context.bot.get_file(voice.file_id)
+            await voice_file.download_to_drive(temp_audio_path)
+            transcribed_text = await voice_transcriber.transcribe_async(temp_audio_path)
+        except Exception as err:
+            logger.error("Error transcribing voice note: %s", err)
+            await send_formatted_message(
+                update.effective_message,
+                "Unable to process voice message. Please try speaking again or send a text message.",
+            )
+            return
+        finally:
+            try:
+                if os.path.exists(temp_audio_path):
+                    os.remove(temp_audio_path)
+            except Exception:
+                pass
+
+        clean_text = (transcribed_text or "").strip()
+        if not clean_text:
+            await send_formatted_message(
+                update.effective_message,
+                "I couldn't clearly understand that voice message. Please try speaking again or send a text message.",
+            )
+            return
+
+        await process_user_text(clean_text, update.effective_message)
 
     async def confirmation_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline button confirmation or cancellation for pending file actions."""
@@ -1062,6 +1154,7 @@ def create_telegram_app(
     app.add_handler(CommandHandler("active", active_handler))
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CallbackQueryHandler(confirmation_callback_handler))
+    app.add_handler(MessageHandler(filters.VOICE, voice_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_error_handler(error_handler)
 

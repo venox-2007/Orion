@@ -69,3 +69,11 @@ htmlcov/
 Thumbs.db
 .idea/
 .vscode/
+
+# Audio and offline speech models
+*.ogg
+*.wav
+*.mp3
+*.m4a
+.cache/
+models/
