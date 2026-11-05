@@ -101,6 +101,7 @@ class WindowManagementArgs(BaseModel):
 
     app_id: str = Field(min_length=1, max_length=50, description="Approved application ID")
     window_token: str | None = Field(default=None, max_length=100, description="Opaque window selection token for multi-window apps")
+    window_index: int | None = Field(default=None, ge=1, le=50, description="Optional 1-based window index")
 
 
 class CompositeAppActionArgs(BaseModel):

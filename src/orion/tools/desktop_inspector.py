@@ -590,6 +590,8 @@ _WINDOW_MANAGEMENT_TOOLS = frozenset({
 
 # Short-lived window token store (module-level)
 _window_tokens: dict[str, "WindowToken"] = {}
+_pending_window_selections: dict[str, dict[int, str]] = {}
+_latest_pending_selection: dict[str, Any] | None = None
 
 
 @dataclass
@@ -600,7 +602,7 @@ class WindowToken:
     hwnd: int               # Only used internally for quick lookup; re-validated at execution
     pid: int                # Captured PID for identity verification
     state: WindowState
-    label: str              # e.g. "Visual Studio Code — Window 1"
+    label: str              # e.g. "Visual Studio Code — Main window"
     created_at: float       # time.time()
 
     TOKEN_TTL_SECONDS: ClassVar[float] = 300.0  # 5 minutes
@@ -622,13 +624,24 @@ def _purge_expired_tokens() -> None:
         _window_tokens.pop(tid, None)
 
 
-def create_window_tokens(app_id: str, windows: list[WindowInfo]) -> list[dict]:
+def create_window_tokens(
+    app_id: str,
+    windows: list[WindowInfo],
+    action: str = "focus",
+) -> list[dict]:
     """Create labeled selection options with short-lived tokens for multi-window apps."""
     _purge_expired_tokens()
+    global _latest_pending_selection
     options = []
+    total = len(windows)
+    app_tokens: dict[int, str] = {}
     for idx, win in enumerate(windows, start=1):
         token_id = _make_token_id()
-        label = f"{win.display_name} \u2014 Window {idx}"
+        if total == 2:
+            label_suffix = "Main window" if idx == 1 else "Secondary window"
+        else:
+            label_suffix = f"Window {idx}"
+        label = f"{win.display_name} — {label_suffix}"
         tok = WindowToken(
             app_id=app_id,
             hwnd=win.hwnd,
@@ -638,12 +651,60 @@ def create_window_tokens(app_id: str, windows: list[WindowInfo]) -> list[dict]:
             created_at=time.time(),
         )
         _window_tokens[token_id] = tok
+        app_tokens[idx] = token_id
         options.append({
             "token_id": token_id,
+            "index": idx,
             "label": label,
             "state": win.state,
         })
+    _pending_window_selections[app_id] = app_tokens
+    _latest_pending_selection = {
+        "app_id": app_id,
+        "action": action,
+        "tokens": app_tokens,
+        "options": options,
+        "created_at": time.time(),
+    }
     return options
+
+
+def get_pending_window_token(app_id: str, index: int) -> str | None:
+    """Retrieve token_id for an index from pending selections for this app."""
+    return _pending_window_selections.get(app_id, {}).get(index)
+
+
+def resolve_choice_to_pending(choice: str | int) -> tuple[str, str, str, str] | None:
+    """Resolve user choice (e.g. 1, '1', 'window 1') to (app_id, action, token_id, label)."""
+    global _latest_pending_selection
+    if not _latest_pending_selection:
+        return None
+    if time.time() - _latest_pending_selection.get("created_at", 0) > 300.0:
+        _latest_pending_selection = None
+        return None
+
+    import re
+    if isinstance(choice, int):
+        idx = choice
+    else:
+        m = re.match(r"^(?:window\s+)?(\d+)$", str(choice).strip(), re.IGNORECASE)
+        if not m:
+            return None
+        idx = int(m.group(1))
+
+    tokens = _latest_pending_selection.get("tokens", {})
+    token_id = tokens.get(idx)
+    if not token_id:
+        return None
+
+    tok = _window_tokens.get(token_id)
+    label = tok.label if tok else f"Window {idx}"
+    return (
+        _latest_pending_selection["app_id"],
+        _latest_pending_selection.get("action", "focus"),
+        token_id,
+        label,
+    )
 
 
 def resolve_window_token(token_id: str, app_id: str) -> tuple[WindowInfo | None, str | None]:
@@ -796,15 +857,67 @@ def _verify_and_act_on_window(
     disp = approved[app_id].display_name if app_id in approved else app_id
 
     if action == "focus":
-        # Handle minimized windows by restoring them first so they can receive focus
-        if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd, _SW_RESTORE)
-            time.sleep(0.05)
+        kernel32 = ctypes.windll.kernel32 if hasattr(ctypes.windll, "kernel32") else None
+        cur_thread = kernel32.GetCurrentThreadId() if kernel32 and hasattr(kernel32, "GetCurrentThreadId") else 0
+        fg_hwnd = user32.GetForegroundWindow() if hasattr(user32, "GetForegroundWindow") else 0
+        fg_thread = (
+            user32.GetWindowThreadProcessId(fg_hwnd, None)
+            if (fg_hwnd and hasattr(user32, "GetWindowThreadProcessId"))
+            else 0
+        )
+        target_thread = (
+            user32.GetWindowThreadProcessId(hwnd, None)
+            if hasattr(user32, "GetWindowThreadProcessId")
+            else 0
+        )
 
-        # Attempt safe foreground activation
-        if hasattr(user32, "BringWindowToTop"):
-            user32.BringWindowToTop(hwnd)
-        user32.SetForegroundWindow(hwnd)
+        attached_fg = False
+        attached_target = False
+
+        try:
+            # Grant permission to set foreground
+            if hasattr(user32, "AllowSetForegroundWindow"):
+                try:
+                    user32.AllowSetForegroundWindow(-1)
+                except Exception:
+                    pass
+
+            # Attach thread input if caller and target/foreground threads differ
+            if hasattr(user32, "AttachThreadInput") and cur_thread:
+                if fg_thread and fg_thread != cur_thread:
+                    try:
+                        attached_fg = bool(user32.AttachThreadInput(cur_thread, fg_thread, True))
+                    except Exception:
+                        pass
+                if target_thread and target_thread != cur_thread and target_thread != fg_thread:
+                    try:
+                        attached_target = bool(user32.AttachThreadInput(cur_thread, target_thread, True))
+                    except Exception:
+                        pass
+
+            # Handle minimized windows by restoring them first so they can receive focus
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, _SW_RESTORE)
+                time.sleep(0.05)
+
+            # Bring window to top and set foreground
+            if hasattr(user32, "BringWindowToTop"):
+                user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+
+        finally:
+            # Clean up thread input attachment immediately in a finally block
+            if hasattr(user32, "AttachThreadInput") and cur_thread:
+                if attached_fg and fg_thread:
+                    try:
+                        user32.AttachThreadInput(cur_thread, fg_thread, False)
+                    except Exception:
+                        pass
+                if attached_target and target_thread:
+                    try:
+                        user32.AttachThreadInput(cur_thread, target_thread, False)
+                    except Exception:
+                        pass
 
         # Bounded verification window (up to ~300ms) for delayed foreground transitions
         focused = False
@@ -827,7 +940,7 @@ def _verify_and_act_on_window(
                 "success": False,
                 "app_id": app_id,
                 "display_name": disp,
-                "error": f"{disp} was not brought to the foreground. Windows may have blocked the focus change.",
+                "error": f"{disp} was not brought to the foreground. Windows may have blocked the focus change or kept it behind another window.",
             }
 
     elif action == "minimize":
@@ -924,6 +1037,7 @@ def _window_management_core(
     app_id: str,
     window_token: str | None,
     action: str,
+    window_index: int | None = None,
 ) -> dict[str, Any]:
     """Shared implementation for all 4 window management tools.
 
@@ -932,6 +1046,7 @@ def _window_management_core(
     - Platform is Windows
     - Window re-enumeration and identity re-validation at execution time
     - Token expiry and stale-window detection
+    - Direct targeting of active foreground window or specified window index when available
     """
     if sys.platform != "win32":
         return {"success": False, "error": "Window management is only available on Windows."}
@@ -947,6 +1062,14 @@ def _window_management_core(
 
     disp = approved[resolved_id].display_name
 
+    # Check if window_token was given as a numeric string or 'window N'
+    if window_token:
+        import re
+        m_idx = re.match(r"^(?:window\s+)?(\d+)$", str(window_token).strip(), re.IGNORECASE)
+        if m_idx:
+            window_index = int(m_idx.group(1))
+            window_token = None
+
     # Token-based path: resolve token to a specific window
     if window_token:
         win, err = resolve_window_token(window_token, resolved_id)
@@ -956,7 +1079,25 @@ def _window_management_core(
             return {"success": False, "error": "The target window is no longer available."}
         return _verify_and_act_on_window(win.hwnd, resolved_id, action)
 
-    # No token: enumerate and find target window(s)
+    # Window index path: 1-based index
+    if window_index is not None:
+        try:
+            all_windows = _enumerate_windows_native()
+        except Exception as err:
+            logger.error("Failed to enumerate windows for %s: %s", resolved_id, err)
+            return {"success": False, "error": "Desktop inspection temporarily unavailable."}
+        app_windows = [w for w in all_windows if w.app_id == resolved_id]
+        if not app_windows:
+            return {"success": False, "error": f"{disp} does not have any open windows."}
+        if 1 <= window_index <= len(app_windows):
+            target_win = app_windows[window_index - 1]
+            return _verify_and_act_on_window(target_win.hwnd, resolved_id, action)
+        return {
+            "success": False,
+            "error": f"Invalid window index {window_index}. {disp} has {len(app_windows)} open window(s).",
+        }
+
+    # No token or index: enumerate and find target window(s)
     single_win, app_windows, enum_err = _get_single_app_window(resolved_id)
 
     if enum_err:
@@ -965,47 +1106,68 @@ def _window_management_core(
     if not app_windows:
         return {"success": False, "error": f"{disp} does not have any open windows."}
 
-    # Multiple windows — need selection
-    if len(app_windows) > 1:
-        options = create_window_tokens(resolved_id, app_windows)
-        return {
-            "success": False,
-            "requires_selection": True,
-            "app_id": resolved_id,
-            "display_name": disp,
-            "windows": options,
-        }
+    # Exactly one window -> act immediately
+    if len(app_windows) == 1:
+        return _verify_and_act_on_window(single_win.hwnd, resolved_id, action)
 
-    # Exactly one window
-    return _verify_and_act_on_window(single_win.hwnd, resolved_id, action)
+    # Multiple windows: check if one window is already the active foreground window
+    active_wins = [w for w in app_windows if w.is_active]
+    if len(active_wins) == 1:
+        return _verify_and_act_on_window(active_wins[0].hwnd, resolved_id, action)
+
+    # Ambiguous multiple windows -> prompt user with clean choices
+    options = create_window_tokens(resolved_id, app_windows, action=action)
+    return {
+        "success": False,
+        "requires_selection": True,
+        "app_id": resolved_id,
+        "display_name": disp,
+        "windows": options,
+    }
 
 
 # =====================================================================
 # PUBLIC WINDOW MANAGEMENT TOOLS (Step 11)
 # =====================================================================
 
-def focus_application_window(app_id: str, window_token: str | None = None) -> dict[str, Any]:
+def focus_application_window(
+    app_id: str,
+    window_token: str | None = None,
+    window_index: int | None = None,
+) -> dict[str, Any]:
     """Bring an approved application window to the foreground.
 
     Requires confirmed re-enumeration before acting. Reports accurate success/failure.
     Never operates on unapproved applications or leaks process details.
     """
-    return _window_management_core(app_id, window_token, "focus")
+    return _window_management_core(app_id, window_token, "focus", window_index=window_index)
 
 
-def minimize_application_window(app_id: str, window_token: str | None = None) -> dict[str, Any]:
+def minimize_application_window(
+    app_id: str,
+    window_token: str | None = None,
+    window_index: int | None = None,
+) -> dict[str, Any]:
     """Minimize an approved application window. Verifies state afterward."""
-    return _window_management_core(app_id, window_token, "minimize")
+    return _window_management_core(app_id, window_token, "minimize", window_index=window_index)
 
 
-def maximize_application_window(app_id: str, window_token: str | None = None) -> dict[str, Any]:
+def maximize_application_window(
+    app_id: str,
+    window_token: str | None = None,
+    window_index: int | None = None,
+) -> dict[str, Any]:
     """Maximize an approved application window. Verifies state afterward."""
-    return _window_management_core(app_id, window_token, "maximize")
+    return _window_management_core(app_id, window_token, "maximize", window_index=window_index)
 
 
-def restore_application_window(app_id: str, window_token: str | None = None) -> dict[str, Any]:
+def restore_application_window(
+    app_id: str,
+    window_token: str | None = None,
+    window_index: int | None = None,
+) -> dict[str, Any]:
     """Restore a minimized/maximized approved application window to Normal state.
 
     Verifies state afterward. Never claims success if the final state does not confirm.
     """
-    return _window_management_core(app_id, window_token, "restore")
+    return _window_management_core(app_id, window_token, "restore", window_index=window_index)

@@ -198,10 +198,11 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
         windows = sel_source.get("windows", [])
         if not windows:
             return f"{disp} has multiple open windows but no selection options could be generated."
-        lines = [f"**{disp}** has multiple open windows. Please select one:"]
-        for w in windows:
-            lines.append(f"• **{w['label']}** — {w['state']} (token: `{w['token_id']}`)")
-        lines.append("\nReply with the window management action and the token, e.g.:\n`minimize vscode window_token: <token_id>`")
+        count_str = "two" if len(windows) == 2 else str(len(windows))
+        lines = [f"I found {count_str} {disp} windows. Which one?"]
+        for idx, w in enumerate(windows, start=1):
+            lbl = w.get("label") or f"{disp} — Window {idx}"
+            lines.append(f"{idx}. {lbl}")
         return "\n".join(lines)
 
     if not result.get("success") or (isinstance(data, dict) and data.get("success") is False):
@@ -347,17 +348,6 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
         "restore_application_window",
     }
     if tool_name in _WINDOW_MGMT_TOOLS:
-        # Handle requires_selection (multi-window disambiguation)
-        if result.get("requires_selection"):
-            disp = result.get("display_name", result.get("app_id", "Application"))
-            windows = result.get("windows", [])
-            if not windows:
-                return f"{disp} has multiple open windows but no selection options could be generated."
-            lines = [f"**{disp}** has multiple open windows. Please select one:"]
-            for w in windows:
-                lines.append(f"• **{w['label']}** — {w['state']} (token: `{w['token_id']}`)")
-            lines.append("\nReply with the window management action and the token, e.g.:\n`minimize vscode window_token: <token_id>`")
-            return "\n".join(lines)
         # Success result
         return data.get("message", "Window operation completed.")
 
@@ -499,6 +489,15 @@ def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
     return None
 
 
+SPLIT_CLAUSE_REGEX = re.compile(
+    r",\s*(?:and\s+)?then\s+"
+    r"|\s+(?:and\s+)?then\s+"
+    r"|,\s*(?:and\s+)?(?=(?:open|launch|start|run|minimize|minimise|maximize|maximise|restore|focus|bring|switch)\b)"
+    r"|\s+and\s+(?=(?:open|launch|start|run|minimize|minimise|maximize|maximise|restore|focus|bring|switch)\b)",
+    re.IGNORECASE,
+)
+
+
 def parse_sequential_command(raw_target: str) -> tuple[str, str] | None:
     """Check if raw_target is '<app> then/and <window_action> [it]'.
 
@@ -507,7 +506,7 @@ def parse_sequential_command(raw_target: str) -> tuple[str, str] | None:
     """
     pattern = (
         r"^(.+?)\s+(?:then\s+|and\s+then\s+|and\s+)"
-        r"(maximize|minimize|restore|focus|bring\s+(?:it\s+)?to\s+(?:the\s+)?(?:front|foreground)|bring\s+up)"
+        r"(maximize|maximise|minimize|minimise|restore|focus|bring\s+(?:it\s+)?to\s+(?:the\s+)?(?:front|foreground)|bring\s+up)"
         r"(?:\s+it)?[\s.!?]*$"
     )
     m = re.match(pattern, raw_target.strip(), re.IGNORECASE)
@@ -536,12 +535,265 @@ def parse_multi_app_targets(raw_target: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+def check_deterministic_multi_action(clean_text: str) -> dict[str, Any] | None:
+    """Parse and validate natural language multi-action or sequential Windows operations.
+
+    Supports:
+    - Multi-launch: "open calc and vs code", "launch notepad, calculator and explorer"
+    - Sequential launch + window action: "open calc then maximize it", "open calc then maximise it"
+    - Interdependent multi-action: "Open notepad and calculator, then minimize notepad"
+    - Focus with pronoun: "Open VS Code and bring it to the front"
+    - Window action then launch: "Minimize calculator then open explorer"
+    - Resolution of 'it' / 'the app' to previously mentioned application
+    - Safe execution limit (max 4 actions)
+    """
+    text = clean_text.strip()
+    text = re.sub(
+        r"^(?:(?:hey\s+|hi\s+)?orion[,\s]+)?(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    clauses = [c.strip() for c in SPLIT_CLAUSE_REGEX.split(text) if c.strip()]
+    if not clauses:
+        return None
+
+    verbs_pat = r"^(?:open|launch|start|run|minimize|minimise|maximize|maximise|restore|focus|bring|switch|put)\b"
+    if not any(re.match(verbs_pat, c, re.IGNORECASE) for c in clauses):
+        return None
+
+    read_only_starts = (
+        "what", "which", "show", "list", "is", "how", "who", "are", "tell"
+    )
+    first_word = text.split()[0].lower() if text.split() else ""
+    if first_word in read_only_starts:
+        return None
+
+    parsed_actions: list[dict[str, Any]] = []
+    last_app_id: str | None = None
+
+    for clause in clauses:
+        c = clause.strip(" .!?\"'")
+        c = re.sub(
+            r"(?i)\s+(?:on\s+my\s+laptop|on\s+my\s+pc|on\s+my\s+computer|on\s+windows)[\.!\?]?$",
+            "",
+            c,
+        ).strip()
+
+        # 1. Launch verbs
+        m_launch = re.match(r"^(?:open|launch|start|run)\s+(.+)$", c, re.IGNORECASE)
+        if m_launch:
+            raw_target = m_launch.group(1).strip()
+            raw_target = re.sub(r"(?i)\s+(?:app|application|program)[\.!\?]?$", "", raw_target).strip(" .!?\"'")
+
+            seq = parse_sequential_command(raw_target)
+            if seq:
+                app_cand, norm_act = seq
+                blocked, reason = is_app_blocked(app_cand)
+                if blocked:
+                    return {"handled": True, "reply": f"Application '{app_cand}' is not in the approved application allowlist. {reason}"}
+                aid = resolve_app_alias(app_cand)
+                if not aid:
+                    return {"handled": True, "reply": f"Application '{app_cand}' is not in the approved application allowlist. ORION only has permission to launch 20 explicitly sanctioned applications. Send `/apps` to see the full list."}
+                disp = _get_short_display_name(aid)
+                is_avail, _, _ = is_app_available(aid)
+                if not is_avail:
+                    return {"handled": True, "reply": f"Cannot launch {disp}: Application is not currently installed or available on this system."}
+                parsed_actions.append({"action": "launch", "app_id": aid, "display_name": disp})
+                parsed_actions.append({"action": norm_act, "app_id": aid, "display_name": disp})
+                last_app_id = aid
+                continue
+
+            sub_targets = parse_multi_app_targets(raw_target)
+            for st in sub_targets:
+                st_clean = st.strip(" .!?\"'")
+                st_lower = st_clean.lower()
+                if st_lower in ("it", "the app", "this", "that"):
+                    if not last_app_id:
+                        return None
+                    aid = last_app_id
+                else:
+                    blocked, reason = is_app_blocked(st_clean)
+                    if blocked:
+                        return {"handled": True, "reply": f"Application '{st_clean}' is not in the approved application allowlist. {reason}"}
+                    aid = resolve_app_alias(st_clean)
+                    if not aid:
+                        return {"handled": True, "reply": f"Application '{st_clean}' is not in the approved application allowlist. ORION only has permission to launch 20 explicitly sanctioned applications. Send `/apps` to see the full list."}
+                disp = _get_short_display_name(aid)
+                is_avail, _, _ = is_app_available(aid)
+                if not is_avail:
+                    return {"handled": True, "reply": f"Cannot launch {disp}: Application is not currently installed or available on this system."}
+                parsed_actions.append({"action": "launch", "app_id": aid, "display_name": disp})
+                last_app_id = aid
+            continue
+
+        # 2. Window management verbs
+        win_action = None
+        raw_win_target = ""
+
+        m_foc = re.match(
+            r"^(?:focus|bring\s+up|bring\s+(?:to\s+(?:the\s+)?(?:front|foreground)|up)|switch\s+to|foreground)\s*(.*)$",
+            c,
+            re.IGNORECASE,
+        )
+        if not m_foc:
+            m_foc = re.match(
+                r"^(?:bring|put)\s+(.+?)\s+(?:to\s+(?:the\s+)?(?:front|foreground)|up)$",
+                c,
+                re.IGNORECASE,
+            )
+        if m_foc:
+            win_action = "focus"
+            raw_win_target = m_foc.group(1).strip()
+        elif re.match(r"^(?:maximize|maximise)\b", c, re.IGNORECASE):
+            win_action = "maximize"
+            raw_win_target = re.sub(r"^(?:maximize|maximise)\s*", "", c, flags=re.IGNORECASE).strip()
+        elif re.match(r"^(?:minimize|minimise)\b", c, re.IGNORECASE):
+            win_action = "minimize"
+            raw_win_target = re.sub(r"^(?:minimize|minimise)\s*", "", c, flags=re.IGNORECASE).strip()
+        elif re.match(r"^restore\b", c, re.IGNORECASE):
+            win_action = "restore"
+            raw_win_target = re.sub(r"^restore\s*", "", c, flags=re.IGNORECASE).strip()
+
+        if win_action:
+            raw_win_target = raw_win_target.strip(" .!?\"'")
+            m_idx = re.search(r"\bwindow\s+(\d+)\b", raw_win_target, re.IGNORECASE)
+            win_idx = int(m_idx.group(1)) if m_idx else None
+            raw_win_target = re.sub(r"\bwindow\s+\d+\b", "", raw_win_target).strip(" .!?\"'")
+            raw_win_target = re.sub(r"(?i)\s+(?:app|application|window|program)[\.!\?]?$", "", raw_win_target).strip(" .!?\"'")
+
+            t_lower = raw_win_target.lower()
+            if t_lower in ("it", "the app", "this", "that", ""):
+                if not last_app_id:
+                    return None
+                aid = last_app_id
+            else:
+                blocked, reason = is_app_blocked(raw_win_target)
+                if blocked:
+                    return {"handled": True, "reply": f"Application '{raw_win_target}' is not in the approved application allowlist. {reason}"}
+                aid = resolve_app_alias(raw_win_target)
+                if not aid:
+                    return {"handled": True, "reply": f"Application '{raw_win_target}' is not in the approved application allowlist. ORION only has permission to launch 20 explicitly sanctioned applications. Send `/apps` to see the full list."}
+
+            disp = _get_short_display_name(aid)
+            act_dict: dict[str, Any] = {"action": win_action, "app_id": aid, "display_name": disp}
+            if win_idx is not None:
+                act_dict["window_index"] = win_idx
+            parsed_actions.append(act_dict)
+            last_app_id = aid
+
+    if len(parsed_actions) > 4:
+        return {
+            "handled": True,
+            "reply": "For security and system stability, ORION can execute at most 4 application operations per request.",
+        }
+
+    if len(parsed_actions) < 2:
+        return None
+
+    if (
+        len(parsed_actions) == 2
+        and parsed_actions[0]["action"] == "launch"
+        and parsed_actions[1]["action"] != "launch"
+        and parsed_actions[0]["app_id"] == parsed_actions[1]["app_id"]
+    ):
+        aid = parsed_actions[0]["app_id"]
+        disp = parsed_actions[0]["display_name"]
+        w_act = parsed_actions[1]["action"]
+        act_verb = {
+            "maximize": "maximize",
+            "minimize": "minimize",
+            "focus": "bring to the foreground",
+            "restore": "restore",
+        }.get(w_act, w_act)
+        proposal_text = (
+            "⚠️ **Action Confirmation Required**\n\n"
+            f"Launch and {act_verb} **{disp}** on your laptop?\n\n"
+            "*Confirm to proceed.*"
+        )
+        clean_args = {
+            "command_type": "launch_and_window",
+            "target_app_id": aid,
+            "window_action": w_act,
+            "summary": f"Launch and {act_verb} {disp}",
+            "display_name": disp,
+            "actions": parsed_actions,
+        }
+        return {
+            "handled": True,
+            "is_proposal": True,
+            "action_type": "composite_app_action",
+            "arguments": clean_args,
+            "proposal_text": proposal_text,
+        }
+
+    if all(a["action"] == "launch" for a in parsed_actions):
+        disp_names = [a["display_name"] for a in parsed_actions]
+        if len(disp_names) == 2:
+            joined_bold = f"**{disp_names[0]}** and **{disp_names[1]}**"
+            joined_plain = f"{disp_names[0]} and {disp_names[1]}"
+        else:
+            joined_bold = f"{', '.join(f'**{n}**' for n in disp_names[:-1])}, and **{disp_names[-1]}**"
+            joined_plain = f"{', '.join(disp_names[:-1])} and {disp_names[-1]}"
+
+        proposal_text = (
+            "⚠️ **Action Confirmation Required**\n\n"
+            f"Launch {joined_bold} on your laptop?\n\n"
+            "*Confirm to proceed.*"
+        )
+        clean_args = {
+            "command_type": "multi_launch",
+            "app_ids": [a["app_id"] for a in parsed_actions],
+            "summary": f"Launch {joined_plain}",
+            "display_names": disp_names,
+            "actions": parsed_actions,
+        }
+        return {
+            "handled": True,
+            "is_proposal": True,
+            "action_type": "composite_app_action",
+            "arguments": clean_args,
+            "proposal_text": proposal_text,
+        }
+
+    prop_lines = ["⚠️ **Action Confirmation Required**\n\nORION proposes the following operations:"]
+    for a in parsed_actions:
+        v_label = {
+            "launch": "Launch",
+            "maximize": "Maximize",
+            "minimize": "Minimize",
+            "focus": "Bring to front",
+            "restore": "Restore",
+        }.get(a["action"], a["action"].title())
+        prop_lines.append(f"• {v_label} **{a['display_name']}**")
+    prop_lines.append("\n*Confirm to proceed.*")
+    proposal_text = "\n".join(prop_lines)
+
+    clean_args = {
+        "command_type": "composite",
+        "actions": parsed_actions,
+        "summary": f"{len(parsed_actions)} application operations",
+    }
+    return {
+        "handled": True,
+        "is_proposal": True,
+        "action_type": "composite_app_action",
+        "arguments": clean_args,
+        "proposal_text": proposal_text,
+    }
+
+
 def check_deterministic_app_launch(clean_text: str) -> dict[str, Any] | None:
     """Deterministically check if text is an imperative app launch, multi-app, or blocked app command.
 
     Avoids false positives in ordinary conversation while providing instant, reliable
     routing for approved launch commands and instant rejection for blocked apps.
     """
+    # Check multi-action / sequential command first
+    multi_res = check_deterministic_multi_action(clean_text)
+    if multi_res:
+        return multi_res
     clean = clean_text.strip()
     match = re.match(
         r"^(?:(?:hey\s+|hi\s+)?orion[,\s]+)?(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?(open|launch|start|run)\s+(.+)$",
@@ -726,7 +978,12 @@ async def route_and_execute_tool(
 
     reg = registry or default_tool_registry
 
-    # 1. Deterministic window and desktop query detection
+    # 1. Deterministic multi-action and sequential command detection
+    multi_res = check_deterministic_multi_action(clean_text)
+    if multi_res:
+        return multi_res
+
+    # 2. Deterministic window and desktop query detection
     win_query = check_deterministic_window_query(clean_text)
     if win_query:
         if win_query.get("handled"):
@@ -754,15 +1011,24 @@ async def route_and_execute_tool(
                 disp = approved[app_id].display_name
                 return {"handled": True, "reply": f"{disp} does not have any open windows."}
 
-            # If multiple windows and no token: execute the tool to get selection options
-            if len(app_windows) > 1:
-                exec_res = reg.execute(tool_name, tool_args)
-                data = exec_res.get("data", {})
-                if data.get("requires_selection"):
-                    reply = format_tool_result(tool_name, exec_res)
+            # If multiple windows, no token, and no index: check if target is ambiguous
+            has_token_or_idx = tool_args.get("window_token") or tool_args.get("window_index")
+            if len(app_windows) > 1 and not has_token_or_idx:
+                active_wins = [w for w in app_windows if w.is_active]
+                if len(active_wins) != 1:
+                    from orion.tools.desktop_inspector import create_window_tokens
+                    act_short = tool_name.replace("_application_window", "")
+                    options = create_window_tokens(app_id, app_windows, action=act_short)
+                    sel_res = {
+                        "requires_selection": True,
+                        "app_id": app_id,
+                        "display_name": approved[app_id].display_name,
+                        "windows": options,
+                    }
+                    reply = format_tool_result(tool_name, sel_res)
                     return {"handled": True, "reply": reply}
 
-            # Single window (or token provided): return proposal for confirmation
+            # Single window (or active window / token provided): return proposal for confirmation
             proposal_text = format_action_proposal(tool_name, tool_args)
             return {
                 "handled": True,

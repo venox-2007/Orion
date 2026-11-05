@@ -1,6 +1,7 @@
 """Telegram bot integration for ORION using long polling."""
 
 import asyncio
+import re
 from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
@@ -641,6 +642,38 @@ def create_telegram_app(
             )
 
         async with user_lock:
+            # Check if user is replying with a choice to a pending window selection (e.g. "1", "2", "window 1")
+            m_win_choice = re.match(r"^(?:window\s+)?([1-9])$", user_text, re.IGNORECASE)
+            if m_win_choice:
+                from orion.tools.desktop_inspector import resolve_choice_to_pending
+                pending_info = resolve_choice_to_pending(user_text)
+                if pending_info:
+                    app_id, action_type, token_id, label = pending_info
+                    tool_name = f"{action_type}_application_window"
+                    tool_args = {"app_id": app_id, "window_token": token_id}
+                    proposal_text = format_action_proposal(tool_name, tool_args)
+                    proposal_text += f"\n\n*Selected: {label}*"
+                    action_id = conv_memory.create_pending_action(
+                        user_id=owner_id,
+                        action_type=tool_name,
+                        payload=tool_args,
+                        ttl_seconds=300,
+                    )
+                    keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("Confirm", callback_data=f"confirm:{action_id}"),
+                            InlineKeyboardButton("Cancel", callback_data=f"cancel:{action_id}"),
+                        ]
+                    ])
+                    html_msg = markdown_to_telegram_html(proposal_text)
+                    try:
+                        await update.effective_message.reply_text(html_msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                    except Exception:
+                        await update.effective_message.reply_text(clean_markdown_to_plain(proposal_text), reply_markup=keyboard)
+                    conv_memory.add_message(owner_id, "user", user_text)
+                    conv_memory.add_message(owner_id, "assistant", proposal_text)
+                    return
+
             # 1. Attempt natural-language tool routing first
             tool_res = await route_and_execute_tool(user_text, ollama_client=client, registry=reg)
             if tool_res and tool_res.get("handled"):
@@ -910,15 +943,16 @@ def create_telegram_app(
                     windows = tool_data.get("windows", [])
                     disp = tool_data.get("display_name", act["payload"].get("app_id", "Application"))
                     if windows:
-                        sel_lines = [f"<b>{disp}</b> has multiple open windows. Please select which one:"]
+                        count_str = "two" if len(windows) == 2 else str(len(windows))
+                        sel_lines = [f"I found {count_str} {disp} windows. Which one?"]
                         buttons = []
-                        for w in windows:
+                        for idx, w in enumerate(windows, start=1):
                             tok_id = w["token_id"]
-                            label = w["label"]
-                            state = w["state"]
+                            label = w.get("label") or f"{disp} — Window {idx}"
+                            sel_lines.append(f"{idx}. {label}")
                             # callback_data must be ≤ 64 bytes: "win_sel:<tok_id>:<action_type>"
                             cb = f"win_sel:{tok_id}:{act['action_type']}"
-                            buttons.append([InlineKeyboardButton(f"{label} ({state})", callback_data=cb)])
+                            buttons.append([InlineKeyboardButton(f"{idx}. {label}", callback_data=cb)])
                         sel_keyboard = InlineKeyboardMarkup(buttons)
                         sel_text = "\n".join(sel_lines)
                         try:

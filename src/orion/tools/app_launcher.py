@@ -761,6 +761,122 @@ def _get_short_display_name(app_id: str) -> str:
     return app_id
 
 
+def _join_names(names: list[str], conj: str = "and") -> str:
+    """Join names with commas and conjunction."""
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} {conj} {names[1]}"
+    return f"{', '.join(names[:-1])} {conj} {names[-1]}"
+
+
+def _format_composite_outcome(
+    succeeded_actions: list[dict[str, Any]],
+    failed_actions: list[dict[str, Any]],
+    skipped_actions: list[dict[str, Any]],
+) -> str:
+    """Format outcomes into concise, natural combined updates without raw JSON or stack traces."""
+    all_acts = succeeded_actions + failed_actions
+    if not all_acts:
+        return "No operations were performed."
+
+    # 1. If only launches:
+    if all(a.get("action") == "launch" for a in all_acts + skipped_actions):
+        s_names = [a["display_name"] for a in succeeded_actions]
+        f_names = [a["display_name"] for a in failed_actions]
+        if s_names and not f_names:
+            return f"Opened {_join_names(s_names)}."
+        elif s_names and f_names:
+            return f"Opened {_join_names(s_names)}, but couldn't launch {_join_names(f_names, 'or')}."
+        else:
+            return f"Couldn't launch {_join_names(f_names, 'or')}."
+
+    # 2. If launch failed and dependent actions were skipped:
+    if not succeeded_actions and failed_actions:
+        first_fail = failed_actions[0]
+        if first_fail.get("action") == "launch":
+            return f"Couldn't launch {first_fail['display_name']}."
+        return f"Couldn't {first_fail['action']} {first_fail['display_name']}."
+
+    launches_succ = [a for a in succeeded_actions if a.get("action") == "launch"]
+    launches_fail = [a for a in failed_actions if a.get("action") == "launch"]
+    wins_succ = [a for a in succeeded_actions if a.get("action") != "launch"]
+    wins_fail = [a for a in failed_actions if a.get("action") != "launch"]
+
+    # Pattern A: Window action first, then launch (e.g. "Minimize calculator then open explorer")
+    if all_acts and all_acts[0].get("action") != "launch":
+        first_w = all_acts[0]
+        w_disp = first_w["display_name"]
+        w_act = first_w["action"]
+        if first_w in wins_succ:
+            past = {"minimize": "minimized", "maximize": "maximized", "restore": "restored", "focus": "focused"}.get(w_act, w_act)
+            win_part = f"{w_disp} {past}."
+        else:
+            win_part = f"Couldn't {w_act} {w_disp}."
+
+        launch_part = ""
+        if launches_succ:
+            l_names = _join_names([a["display_name"] for a in launches_succ])
+            launch_part = f" {l_names} is now open."
+        elif launches_fail:
+            l_names = _join_names([a["display_name"] for a in launches_fail], "or")
+            launch_part = f" Couldn't open {l_names}."
+
+        return (win_part + launch_part).strip()
+
+    # Pattern B: Launch(es) first, then window action(s)
+    if launches_succ:
+        l_names = _join_names([a["display_name"] for a in launches_succ])
+
+        # Single app: launched and window-managed
+        if len(launches_succ) == 1 and wins_succ and len(wins_succ) == 1 and wins_succ[0]["app_id"] == launches_succ[0]["app_id"]:
+            w = wins_succ[0]
+            if w["action"] == "focus":
+                return f"Opened {l_names} and brought it to the front."
+            elif w["action"] in ("maximize", "minimize", "restore"):
+                past = {"maximize": "maximized", "minimize": "minimized", "restore": "restored"}.get(w["action"])
+                return f"Opened and {past} {l_names}."
+
+        # Single app: launch succeeded, but window action failed
+        if len(launches_succ) == 1 and wins_fail and len(wins_fail) == 1 and wins_fail[0]["app_id"] == launches_succ[0]["app_id"]:
+            w = wins_fail[0]
+            err = (w.get("error") or "").lower()
+            if w["action"] == "focus" and ("behind" in err or "blocked" in err or "front" in err or "foreground" in err):
+                return f"Opened {l_names}, but Windows wouldn't bring it to the front."
+            verb = {"maximize": "maximize it", "minimize": "minimize it", "restore": "restore it", "focus": "bring it to the front"}.get(w["action"], f"{w['action']} it")
+            return f"Opened {l_names}, but couldn't {verb}."
+
+        # Multiple launches with window action:
+        launch_sent = f"Opened {l_names}."
+        win_sents = []
+        for w in wins_succ:
+            w_disp = w["display_name"]
+            if w["action"] == "focus":
+                win_sents.append(f"{w_disp} is now in the foreground.")
+            elif w["action"] == "maximize":
+                win_sents.append(f"{w_disp} is now maximized.")
+            elif w["action"] == "minimize":
+                win_sents.append(f"{w_disp} is now minimized.")
+            elif w["action"] == "restore":
+                win_sents.append(f"{w_disp} is now restored to Normal.")
+
+        for w in wins_fail:
+            w_disp = w["display_name"]
+            err = (w.get("error") or "").lower()
+            if w["action"] == "focus" and ("behind" in err or "blocked" in err or "front" in err or "foreground" in err):
+                win_sents.append(f"Windows wouldn't bring {w_disp} to the front.")
+            else:
+                win_sents.append(f"Couldn't {w['action']} {w_disp}.")
+
+        if win_sents:
+            return f"{launch_sent} {' '.join(win_sents)}"
+        return launch_sent
+
+    return "Operations completed."
+
+
 def execute_composite_app_action(
     command_type: str,
     app_ids: list[str] | None = None,
@@ -773,129 +889,109 @@ def execute_composite_app_action(
 ) -> dict[str, Any]:
     """Execute multiple application launches or sequential launch-and-window actions.
 
-    Executes each action sequentially, verifies individual outcomes, and returns
-    a concise, natural combined message.
+    Executes each action sequentially, verifies individual outcomes, stops dependent
+    actions if a prerequisite fails, and returns a concise, natural combined message.
     """
     import time
     approved = get_approved_apps()
 
-    if command_type == "multi_launch":
-        app_ids = app_ids or []
-        succeeded: list[str] = []
-        failed: list[str] = []
+    # Normalize actions list from legacy command_type if not provided
+    action_list = list(actions or [])
+    if not action_list:
+        if command_type == "multi_launch":
+            for aid in (app_ids or []):
+                action_list.append({"action": "launch", "app_id": aid})
+        elif command_type == "launch_and_window":
+            target = target_app_id or (app_ids[0] if app_ids else None)
+            if target:
+                action_list.append({"action": "launch", "app_id": target})
+                action_list.append({"action": window_action or "maximize", "app_id": target})
 
-        for aid in app_ids:
-            if aid not in approved:
-                failed.append(aid)
-                continue
+    if not action_list:
+        return {"success": False, "error": f"No actions specified for {command_type}."}
 
-            app = approved[aid]
-            disp = _get_short_display_name(aid)
+    succeeded_actions: list[dict[str, Any]] = []
+    failed_actions: list[dict[str, Any]] = []
+    skipped_actions: list[dict[str, Any]] = []
+    failed_apps: set[str] = set()
+    launched_apps: set[str] = set()
+
+    from orion.tools.desktop_inspector import (
+        _enumerate_windows_native,
+        focus_application_window,
+        maximize_application_window,
+        minimize_application_window,
+        restore_application_window,
+    )
+
+    act_map = {
+        "focus": focus_application_window,
+        "minimize": minimize_application_window,
+        "maximize": maximize_application_window,
+        "restore": restore_application_window,
+    }
+
+    for item in action_list:
+        act = item.get("action", "launch")
+        aid = item.get("app_id", "")
+        disp = item.get("display_name") or _get_short_display_name(aid)
+
+        if not aid or aid not in approved:
+            failed_actions.append({"action": act, "app_id": aid, "display_name": disp, "error": "not approved"})
+            failed_apps.add(aid)
+            continue
+
+        # Prerequisite failure check: stop dependent actions on this app
+        if aid in failed_apps:
+            skipped_actions.append({"action": act, "app_id": aid, "display_name": disp, "error": "prerequisite failed"})
+            continue
+
+        if act == "launch":
             is_avail, _, _ = is_app_available(aid)
             if not is_avail:
-                failed.append(disp)
+                failed_actions.append({"action": act, "app_id": aid, "display_name": disp, "error": "not available"})
+                failed_apps.add(aid)
                 continue
 
             res = launch_application(aid)
             if res.get("success"):
-                succeeded.append(disp)
+                launched_apps.add(aid)
+                succeeded_actions.append({"action": act, "app_id": aid, "display_name": disp})
             else:
-                failed.append(disp)
+                failed_actions.append({"action": act, "app_id": aid, "display_name": disp, "error": res.get("error")})
+                failed_apps.add(aid)
 
-        def _join_names(names: list[str], conj: str = "and") -> str:
-            if not names:
-                return ""
-            if len(names) == 1:
-                return names[0]
-            if len(names) == 2:
-                return f"{names[0]} {conj} {names[1]}"
-            return f"{', '.join(names[:-1])} {conj} {names[-1]}"
+        elif act in act_map:
+            # If app was just launched earlier in this command, wait briefly for window to appear
+            if aid in launched_apps:
+                for _ in range(5):
+                    try:
+                        wins = _enumerate_windows_native()
+                        if any(w.app_id == aid for w in wins):
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(0.25)
 
-        if succeeded and not failed:
-            msg = f"Opened {_join_names(succeeded)}."
-        elif succeeded and failed:
-            msg = f"Opened {_join_names(succeeded)}, but couldn't launch {_join_names(failed, 'or')}."
-        else:
-            msg = f"Couldn't launch {_join_names(failed, 'or')}."
-
-        return {
-            "success": len(succeeded) > 0,
-            "message": msg,
-            "succeeded": succeeded,
-            "failed": failed,
-        }
-
-    elif command_type == "launch_and_window":
-        target = target_app_id or (app_ids[0] if app_ids else None)
-        if not target or target not in approved:
-            return {"success": False, "error": f"Application '{target}' is not approved."}
-
-        disp = _get_short_display_name(target)
-
-        # 1. Launch the application
-        is_avail, _, _ = is_app_available(target)
-        if not is_avail:
-            return {"success": False, "message": f"Couldn't launch {disp}."}
-
-        launch_res = launch_application(target)
-        if not launch_res.get("success"):
-            return {"success": False, "message": f"Couldn't launch {disp}."}
-
-        # 2. Wait briefly for window to appear on desktop (up to ~1.5s)
-        from orion.tools.desktop_inspector import (
-            _enumerate_windows_native,
-            focus_application_window,
-            maximize_application_window,
-            minimize_application_window,
-            restore_application_window,
-        )
-
-        win_found = False
-        for _ in range(5):
-            try:
-                wins = _enumerate_windows_native()
-                if any(w.app_id == target for w in wins):
-                    win_found = True
-                    break
-            except Exception:
-                pass
-            time.sleep(0.3)
-
-        # 3. Perform the requested window action
-        win_res: dict[str, Any] = {"success": False}
-        act_map = {
-            "maximize": maximize_application_window,
-            "minimize": minimize_application_window,
-            "focus": focus_application_window,
-            "restore": restore_application_window,
-        }
-        fn = act_map.get(window_action or "maximize")
-        if fn:
-            win_res = fn(target)
-
-        # 4. Natural response formatting
-        verb_success = {
-            "maximize": "maximized",
-            "minimize": "minimized",
-            "focus": "brought it to the foreground",
-            "restore": "restored",
-        }.get(window_action, "managed")
-
-        verb_fail = {
-            "maximize": "maximize it",
-            "minimize": "minimize it",
-            "focus": "bring it to the foreground",
-            "restore": "restore it",
-        }.get(window_action, "manage it")
-
-        if win_res.get("success"):
-            if window_action in ("maximize", "minimize", "restore"):
-                msg = f"Opened and {verb_success} {disp}."
+            tok = item.get("window_token")
+            idx = item.get("window_index")
+            fn = act_map[act]
+            win_res = fn(aid, window_token=tok, window_index=idx)
+            if win_res.get("success"):
+                succeeded_actions.append({"action": act, "app_id": aid, "display_name": disp, "message": win_res.get("message")})
             else:
-                msg = f"Opened {disp} and {verb_success}."
-            return {"success": True, "message": msg}
+                failed_actions.append({"action": act, "app_id": aid, "display_name": disp, "error": win_res.get("error", "")})
         else:
-            msg = f"Opened {disp}, but couldn't {verb_fail}."
-            return {"success": True, "partial": True, "message": msg}
+            failed_actions.append({"action": act, "app_id": aid, "display_name": disp, "error": f"unknown action {act}"})
 
-    return {"success": False, "error": f"Unknown command type: {command_type}"}
+    msg = _format_composite_outcome(succeeded_actions, failed_actions, skipped_actions)
+    overall_success = len(succeeded_actions) > 0
+
+    return {
+        "success": overall_success,
+        "partial": len(failed_actions) > 0 and len(succeeded_actions) > 0,
+        "message": msg,
+        "succeeded": [a["display_name"] for a in succeeded_actions],
+        "failed": [a["display_name"] for a in failed_actions],
+        "skipped": [a["display_name"] for a in skipped_actions],
+    }
