@@ -1026,7 +1026,15 @@ async def route_and_execute_tool(
                         "windows": options,
                     }
                     reply = format_tool_result(tool_name, sel_res)
-                    return {"handled": True, "reply": reply}
+                    return {
+                        "handled": True,
+                        "reply": reply,
+                        "requires_selection": True,
+                        "windows": options,
+                        "action_type": act_short,
+                        "app_id": app_id,
+                        "display_name": approved[app_id].display_name,
+                    }
 
             # Single window (or active window / token provided): return proposal for confirmation
             proposal_text = format_action_proposal(tool_name, tool_args)

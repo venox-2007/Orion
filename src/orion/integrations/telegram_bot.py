@@ -114,6 +114,96 @@ def is_authorized_owner(update: Update, owner_id: int) -> bool:
     return True
 
 
+def interpret_voice_command(
+    transcript: str,
+    recent_context: dict[str, Any] | None = None,
+) -> tuple[str, bool, str | None]:
+    """Interpret speech transcript using current task and window context.
+
+    Returns:
+        (interpreted_text, is_ambiguous, clarification_prompt)
+        - If is_ambiguous is True, clarification_prompt should be sent to the user.
+        - Otherwise, interpreted_text should be processed through the command pipeline.
+    """
+    raw = (transcript or "").strip()
+    if not raw:
+        return "", False, None
+
+    # Strip speech transcript punctuation and whitespace
+    clean = raw.strip(" .!?\"'")
+
+    # 1. Check if an active pending window selection exists
+    from orion.tools.desktop_inspector import (
+        is_pending_window_selection_active,
+        parse_window_choice,
+    )
+
+    if is_pending_window_selection_active():
+        idx = parse_window_choice(clean)
+        if idx is not None:
+            # Normalized window choice representation (e.g. "1", "2")
+            return str(idx), False, None
+
+    # 2. Phonetic corrections & transcription slip normalization for approved apps & window verbs
+    normalized = clean
+    phonetic_subs = [
+        (r"\b(?:call\s*c|cal\s*c|cal\s*see)\b", "calc"),
+        (r"\bv\s*s\s*code\b", "vs code"),
+        (r"\b(?:we|wee)\s*s\s*code\b", "vs code"),
+        (r"\bnote\s+pad\b", "notepad"),
+        (r"\bnot\s+pad\b", "notepad"),
+        (r"\bpower\s+point\b", "powerpoint"),
+        (r"\btask\s+mgr\b", "task manager"),
+        (r"\bwindows\s+explorer\b", "file explorer"),
+        (r"\bmaximise\b", "maximize"),
+        (r"\bminimise\b", "minimize"),
+    ]
+    for pattern, repl in phonetic_subs:
+        normalized = re.sub(pattern, repl, normalized, flags=re.IGNORECASE)
+
+    # 3. Contextual pronoun resolution: e.g. "maximize it", "bring it to the front"
+    if recent_context:
+        recent_app = recent_context.get("recent_app_id")
+        if not recent_app and "memory" in recent_context and "owner_id" in recent_context:
+            mem = recent_context["memory"]
+            oid = recent_context["owner_id"]
+            if hasattr(mem, "get_recent_action_history"):
+                history = mem.get_recent_action_history(oid, limit=3)
+                for h in history:
+                    payload = h.get("payload") or {}
+                    if isinstance(payload, dict) and payload.get("app_id"):
+                        recent_app = payload["app_id"]
+                        break
+                    elif isinstance(payload, dict) and payload.get("target_app_id"):
+                        recent_app = payload["target_app_id"]
+                        break
+        if recent_app:
+            m_pronoun = re.match(
+                r"^(?:(?:hey\s+|hi\s+)?orion[,\s]+)?(?:please\s+)?(maximize|minimize|restore|focus|bring\s+(?:it\s+)?to\s+(?:the\s+)?(?:front|foreground))\s+(?:it|this|that|the\s+app|the\s+window)[\s.!?]*$",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+            if m_pronoun:
+                verb = m_pronoun.group(1).strip()
+                normalized = f"{verb} {recent_app}"
+
+    # 4. Sensitive / Destructive operation guard:
+    # Never silently change uncertain commands into destructive or sensitive operations.
+    destructive_keywords = {"delete", "remove", "erase", "overwrite", "wipe", "format", "destroy", "truncate"}
+    words_in_transcript = set(re.findall(r"\b\w+\b", normalized.lower()))
+    has_destructive = bool(destructive_keywords & words_in_transcript)
+    if has_destructive:
+        tokens = normalized.split()
+        if len(tokens) <= 3 or any(w in words_in_transcript for w in ("that", "it", "this", "something", "everything", "all")):
+            return (
+                normalized,
+                True,
+                "Could you please clarify which file or action you want to perform?",
+            )
+
+    return normalized, False, None
+
+
 def create_telegram_app(
     token: str,
     owner_id: int,
@@ -485,6 +575,14 @@ def create_telegram_app(
             return
 
         async with user_lock:
+            from orion.tools.desktop_inspector import (
+                is_pending_window_selection_active,
+                clear_pending_window_selection,
+            )
+            has_pending_win = is_pending_window_selection_active()
+            if has_pending_win:
+                clear_pending_window_selection()
+
             running = conv_memory.get_running_workflow(owner_id)
             pending_wf = conv_memory.get_pending_workflows(owner_id)
             pending_single = conv_memory.get_pending_single_actions(owner_id)
@@ -496,6 +594,11 @@ def create_telegram_app(
                     await send_formatted_message(
                         update.effective_message,
                         "A task is currently running. Running filesystem operations cannot be safely cancelled through this command.",
+                    )
+                elif has_pending_win:
+                    await send_formatted_message(
+                        update.effective_message,
+                        "Pending window selection cancelled.",
                     )
                 else:
                     await send_formatted_message(
@@ -639,41 +742,104 @@ def create_telegram_app(
 
     async def process_user_text(user_text: str, reply_target: Any) -> None:
         async with user_lock:
-            # Check if user is replying with a choice to a pending window selection (e.g. "1", "2", "window 1")
-            m_win_choice = re.match(r"^(?:window\s+)?([1-9])$", user_text, re.IGNORECASE)
-            if m_win_choice:
-                from orion.tools.desktop_inspector import resolve_choice_to_pending
+            from orion.tools.desktop_inspector import (
+                clear_pending_window_selection,
+                create_window_tokens,
+                is_pending_window_selection_active,
+                resolve_choice_to_pending,
+                resolve_window_token,
+                _get_single_app_window,
+                _verify_and_act_on_window,
+            )
+
+            # Check if user is replying with a choice to an active pending window selection
+            if is_pending_window_selection_active():
                 pending_info = resolve_choice_to_pending(user_text)
                 if pending_info:
                     app_id, action_type, token_id, label = pending_info
+                    approved_apps = get_approved_apps()
+                    app_obj = approved_apps.get(app_id)
+                    app_name = app_obj.display_name if app_obj else app_id.title()
+
+                    # 1. Revalidate the selected window before acting
+                    win, err = resolve_window_token(token_id, app_id)
+                    if err or win is None:
+                        single_win, app_windows, _ = _get_single_app_window(app_id)
+                        if app_windows:
+                            options = create_window_tokens(app_id, app_windows, action=action_type)
+                            buttons = []
+                            count_str = "two" if len(app_windows) == 2 else str(len(app_windows))
+                            sel_lines = [f"The selected window is no longer available. I found {count_str} open {app_name} windows. Which one?"]
+                            for w in options:
+                                b_idx = w["index"]
+                                b_lbl = w.get("label") or f"{app_name} — Window {b_idx}"
+                                b_tok = w["token_id"]
+                                buttons.append([InlineKeyboardButton(f"{b_idx}. {b_lbl}", callback_data=f"win_sel:{b_tok}:{action_type}")])
+                            kb = InlineKeyboardMarkup(buttons)
+                            sel_reply = "\n".join(sel_lines)
+                            try:
+                                await reply_target.reply_text(markdown_to_telegram_html(sel_reply), parse_mode=ParseMode.HTML, reply_markup=kb)
+                            except Exception:
+                                await reply_target.reply_text(clean_markdown_to_plain(sel_reply), reply_markup=kb)
+                            conv_memory.add_message(owner_id, "user", user_text)
+                            conv_memory.add_message(owner_id, "assistant", sel_reply)
+                        else:
+                            clear_pending_window_selection()
+                            msg = f"The selected window has closed, and {app_name} does not have any open windows."
+                            await send_formatted_message(reply_target, msg)
+                            conv_memory.add_message(owner_id, "user", user_text)
+                            conv_memory.add_message(owner_id, "assistant", msg)
+                        return
+
+                    # 2. Resume the ORIGINAL pending operation after selection
+                    act_res = _verify_and_act_on_window(win.hwnd, app_id, action_type)
                     tool_name = f"{action_type}_application_window"
-                    tool_args = {"app_id": app_id, "window_token": token_id}
-                    proposal_text = format_action_proposal(tool_name, tool_args)
-                    proposal_text += f"\n\n*Selected: {label}*"
-                    action_id = conv_memory.create_pending_action(
+                    is_successful = act_res.get("success", False)
+                    status_str = "success" if is_successful else "failed"
+
+                    conv_memory.log_action_history(
                         user_id=owner_id,
                         action_type=tool_name,
-                        payload=tool_args,
-                        ttl_seconds=300,
+                        payload={"app_id": app_id, "window_token": token_id},
+                        status=status_str,
+                        result=act_res,
                     )
-                    keyboard = InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton("Confirm", callback_data=f"confirm:{action_id}"),
-                            InlineKeyboardButton("Cancel", callback_data=f"cancel:{action_id}"),
-                        ]
-                    ])
-                    html_msg = markdown_to_telegram_html(proposal_text)
-                    try:
-                        await reply_target.reply_text(html_msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
-                    except Exception:
-                        await reply_target.reply_text(clean_markdown_to_plain(proposal_text), reply_markup=keyboard)
+
+                    clear_pending_window_selection()
+
+                    if is_successful:
+                        result_msg = act_res.get("message", f"{label} updated successfully.")
+                    else:
+                        result_msg = act_res.get("error", "Failed to complete window operation.")
+
+                    await send_formatted_message(reply_target, result_msg)
                     conv_memory.add_message(owner_id, "user", user_text)
-                    conv_memory.add_message(owner_id, "assistant", proposal_text)
+                    conv_memory.add_message(owner_id, "assistant", result_msg)
                     return
 
             # 1. Attempt natural-language tool routing first
             tool_res = await route_and_execute_tool(user_text, ollama_client=client, registry=reg)
             if tool_res and tool_res.get("handled"):
+                if tool_res.get("requires_selection"):
+                    windows = tool_res.get("windows", [])
+                    disp = tool_res.get("display_name") or tool_res.get("app_id", "Application").title()
+                    act_type = tool_res.get("action_type", "focus")
+                    buttons = []
+                    for w in windows:
+                        b_idx = w["index"]
+                        b_lbl = w.get("label") or f"{disp} — Window {b_idx}"
+                        b_tok = w["token_id"]
+                        buttons.append([InlineKeyboardButton(f"{b_idx}. {b_lbl}", callback_data=f"win_sel:{b_tok}:{act_type}")])
+                    sel_keyboard = InlineKeyboardMarkup(buttons)
+                    reply_text = tool_res.get("reply", f"Which {disp} window?")
+                    try:
+                        await reply_target.reply_text(markdown_to_telegram_html(reply_text), parse_mode=ParseMode.HTML, reply_markup=sel_keyboard)
+                    except Exception:
+                        await reply_target.reply_text(clean_markdown_to_plain(reply_text), reply_markup=sel_keyboard)
+                    conv_memory.add_message(owner_id, "user", user_text)
+                    conv_memory.add_message(owner_id, "assistant", reply_text)
+                    return
+
                 if tool_res.get("is_workflow_proposal"):
                     workflow_id = conv_memory.create_execution_workflow(
                         user_id=owner_id,
@@ -840,7 +1006,19 @@ def create_telegram_app(
             except Exception:
                 pass
 
-        clean_text = (transcribed_text or "").strip()
+        raw_transcript = (transcribed_text or "").strip()
+        logger.info("Voice transcription received (raw): %r", raw_transcript)
+
+        interpreted_text, is_ambiguous, clarification = interpret_voice_command(
+            raw_transcript,
+            recent_context={"owner_id": owner_id, "memory": conv_memory},
+        )
+
+        if is_ambiguous and clarification:
+            await send_formatted_message(update.effective_message, clarification)
+            return
+
+        clean_text = (interpreted_text or "").strip()
         if not clean_text:
             await send_formatted_message(
                 update.effective_message,
@@ -866,6 +1044,8 @@ def create_telegram_app(
         data = query.data or ""
         if data == "cancel_all_pending":
             async with user_lock:
+                from orion.tools.desktop_inspector import clear_pending_window_selection
+                clear_pending_window_selection()
                 cancelled_count = conv_memory.cancel_all_pending(owner_id)
                 msg = f"Cancelled {cancelled_count} pending proposal(s). No filesystem changes were made."
                 try:
@@ -882,6 +1062,8 @@ def create_telegram_app(
         async with user_lock:
             # Handle multi-step execution workflows (Step 7)
             if action == "wf_cancel":
+                from orion.tools.desktop_inspector import clear_pending_window_selection
+                clear_pending_window_selection()
                 success = conv_memory.cancel_execution_workflow(action_id)
                 if success:
                     cancel_msg = "Task cancelled. No filesystem changes were made."
@@ -945,6 +1127,8 @@ def create_telegram_app(
 
             # Handle single-action file operations (Step 6)
             if action == "cancel":
+                from orion.tools.desktop_inspector import clear_pending_window_selection
+                clear_pending_window_selection()
                 success = conv_memory.mark_pending_action_status(
                     action_id,
                     from_status="pending",
@@ -1080,54 +1264,83 @@ def create_telegram_app(
 
             # Handle multi-window selection callbacks: "win_sel:<token_id>:<action_type>"
             if action == "win_sel":
-                # action_id here is actually "<token_id>:<action_type>" from the split on first ":"
-                # We split the remaining parts
                 parts = action_id.split(":", 1)
                 if len(parts) != 2:
                     await query.answer("Invalid window selection.", show_alert=True)
                     return
                 token_id, win_action_type = parts
-                if win_action_type not in _WINDOW_MANAGEMENT_ACTION_TYPES:
+                if win_action_type not in _WINDOW_MANAGEMENT_ACTION_TYPES and f"{win_action_type}_application_window" not in _WINDOW_MANAGEMENT_ACTION_TYPES:
                     await query.answer("Invalid window action type.", show_alert=True)
                     return
 
-                # Resolve token to get app_id
-                from orion.tools.desktop_inspector import _window_tokens
+                from orion.tools.desktop_inspector import (
+                    _window_tokens,
+                    resolve_window_token,
+                    _verify_and_act_on_window,
+                    clear_pending_window_selection,
+                    _get_single_app_window,
+                    create_window_tokens,
+                )
                 tok = _window_tokens.get(token_id)
-                if not tok:
-                    await query.edit_message_text("Window selection has expired. Please retry the operation.")
-                    return
-                if tok.is_expired():
-                    _window_tokens.pop(token_id, None)
+                if not tok or tok.is_expired():
+                    clear_pending_window_selection()
                     await query.edit_message_text("Window selection has expired. Please retry the operation.")
                     return
 
                 app_id = tok.app_id
-                payload = {"app_id": app_id, "window_token": token_id}
+                action_name = win_action_type.replace("_application_window", "")
+                norm_tool_name = f"{action_name}_application_window"
 
-                # Create a new pending action with specific token and present final confirmation
-                new_action_id = conv_memory.create_pending_action(
+                # 1. Revalidate the selected window before acting
+                win, err = resolve_window_token(token_id, app_id)
+                if err or win is None:
+                    single_win, app_windows, _ = _get_single_app_window(app_id)
+                    disp = get_approved_apps().get(app_id)
+                    app_name = disp.display_name if disp else app_id.title()
+                    if app_windows:
+                        options = create_window_tokens(app_id, app_windows, action=action_name)
+                        buttons = []
+                        count_str = "two" if len(app_windows) == 2 else str(len(app_windows))
+                        sel_lines = [f"The selected window is no longer available. I found {count_str} open {app_name} windows. Which one?"]
+                        for w in options:
+                            b_idx = w["index"]
+                            b_lbl = w.get("label") or f"{app_name} — Window {b_idx}"
+                            b_tok = w["token_id"]
+                            buttons.append([InlineKeyboardButton(f"{b_idx}. {b_lbl}", callback_data=f"win_sel:{b_tok}:{action_name}")])
+                        kb = InlineKeyboardMarkup(buttons)
+                        await query.edit_message_text("\n".join(sel_lines), reply_markup=kb)
+                    else:
+                        clear_pending_window_selection()
+                        await query.edit_message_text(f"The selected window has closed, and {app_name} does not have any open windows.")
+                    return
+
+                # 2. Resume the ORIGINAL pending operation
+                act_res = _verify_and_act_on_window(win.hwnd, app_id, action_name)
+                is_successful = act_res.get("success", False)
+                status_str = "success" if is_successful else "failed"
+
+                conv_memory.log_action_history(
                     user_id=owner_id,
-                    action_type=win_action_type,
-                    payload=payload,
-                    ttl_seconds=120,
+                    action_type=norm_tool_name,
+                    payload={"app_id": app_id, "window_token": token_id},
+                    status=status_str,
+                    result=act_res,
                 )
-                from orion.tools.router import format_action_proposal
-                proposal_text = format_action_proposal(win_action_type, {"app_id": app_id})
-                # Append window label context
-                proposal_text += f"\n\n*Selected: {tok.label}*"
 
-                keyboard = InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("Confirm", callback_data=f"confirm:{new_action_id}"),
-                        InlineKeyboardButton("Cancel", callback_data=f"cancel:{new_action_id}"),
-                    ]
-                ])
-                html_prop = markdown_to_telegram_html(proposal_text)
+                clear_pending_window_selection()
+
+                if is_successful:
+                    result_msg = act_res.get("message", f"{tok.label} updated successfully.")
+                else:
+                    result_msg = act_res.get("error", "Failed to complete window operation.")
+
                 try:
-                    await query.edit_message_text(html_prop, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                    await query.edit_message_text(markdown_to_telegram_html(result_msg), parse_mode=ParseMode.HTML)
                 except Exception:
-                    await query.edit_message_text(clean_markdown_to_plain(proposal_text), reply_markup=keyboard)
+                    await query.edit_message_text(clean_markdown_to_plain(result_msg))
+
+                conv_memory.add_message(owner_id, "assistant", result_msg)
+                return
 
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle errors cleanly without printing stack traces to chat or stdout."""

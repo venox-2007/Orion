@@ -16,6 +16,7 @@ import hashlib
 import logging
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any, ClassVar, Literal
@@ -674,8 +675,104 @@ def get_pending_window_token(app_id: str, index: int) -> str | None:
     return _pending_window_selections.get(app_id, {}).get(index)
 
 
+ORDINAL_OR_WORD_TO_INDEX: dict[str, int] = {
+    "1": 1, "one": 1, "1st": 1, "first": 1, "main": 1,
+    "2": 2, "two": 2, "2nd": 2, "second": 2, "secondary": 2,
+    "3": 3, "three": 3, "3rd": 3, "third": 3,
+    "4": 4, "four": 4, "4th": 4, "fourth": 4,
+    "5": 5, "five": 5, "5th": 5, "fifth": 5,
+}
+
+
+def parse_window_choice(choice: str | int) -> int | None:
+    """Parse user choice (spoken or typed) to an integer index (1-based).
+
+    Supports:
+    - 1, 2, 3
+    - "1", "window 1", "win 1", "window one"
+    - "main", "main one", "the main one", "main window", "the main window" -> 1
+    - "secondary", "secondary one", "the secondary one", "secondary window" -> 2
+    - "first", "first one", "the first one", "1st", "1st one" -> 1
+    - "second", "second one", "the second one", "2nd", "2nd one" -> 2
+    - "choose 1", "pick the second one", "select window 2"
+    """
+    if isinstance(choice, int):
+        return choice if choice > 0 else None
+
+    text = str(choice).strip().lower()
+    # Strip conversational prefixes: "hey orion", "please", "can you", "could you", "choose", "pick", "select"
+    text = re.sub(
+        r"^(?:(?:hey\s+|hi\s+)?orion[,\s]+)?(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
+    text = re.sub(
+        r"^(?:choose|pick|select|switch\s+to|focus|maximize|minimise|minimize|restore|bring\s+up|take)\s+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
+    text = re.sub(r"^the\s+", "", text, flags=re.IGNORECASE).strip()
+    text = text.strip(" .!?\"'")
+
+    # Pattern: "window 1", "win 1", "window main", "window second", "window one"
+    m_win = re.match(r"^(?:window|win)\s+(.+?)(?:\s+one|\s+window)?$", text, flags=re.IGNORECASE)
+    if m_win:
+        cand = m_win.group(1).strip()
+        if cand in ORDINAL_OR_WORD_TO_INDEX:
+            return ORDINAL_OR_WORD_TO_INDEX[cand]
+        if cand.isdigit():
+            val = int(cand)
+            return val if val > 0 else None
+
+    # Pattern: "<token> one" or "<token> window" (e.g. "main one", "second one", "first one", "secondary window")
+    m_one = re.match(r"^(.+?)\s+(?:one|window)$", text, flags=re.IGNORECASE)
+    if m_one:
+        cand = m_one.group(1).strip()
+        if cand in ORDINAL_OR_WORD_TO_INDEX:
+            return ORDINAL_OR_WORD_TO_INDEX[cand]
+        if cand.isdigit():
+            val = int(cand)
+            return val if val > 0 else None
+
+    # Direct match in dictionary
+    if text in ORDINAL_OR_WORD_TO_INDEX:
+        return ORDINAL_OR_WORD_TO_INDEX[text]
+
+    if text.isdigit():
+        val = int(text)
+        return val if val > 0 else None
+
+    return None
+
+
+def clear_pending_window_selection() -> None:
+    """Clear active pending window selection state."""
+    global _latest_pending_selection
+    _latest_pending_selection = None
+
+
+def is_pending_window_selection_active() -> bool:
+    """Return True if there is an active, unexpired pending window selection."""
+    global _latest_pending_selection
+    if not _latest_pending_selection:
+        return False
+    if time.time() - _latest_pending_selection.get("created_at", 0) > 300.0:
+        _latest_pending_selection = None
+        return False
+    return True
+
+
+def get_latest_pending_selection() -> dict[str, Any] | None:
+    """Return latest pending window selection dict if still valid."""
+    if is_pending_window_selection_active():
+        return _latest_pending_selection
+    return None
+
+
 def resolve_choice_to_pending(choice: str | int) -> tuple[str, str, str, str] | None:
-    """Resolve user choice (e.g. 1, '1', 'window 1') to (app_id, action, token_id, label)."""
+    """Resolve user choice (e.g. 1, '1', 'window 1', 'main one', 'second one') to (app_id, action, token_id, label)."""
     global _latest_pending_selection
     if not _latest_pending_selection:
         return None
@@ -683,14 +780,9 @@ def resolve_choice_to_pending(choice: str | int) -> tuple[str, str, str, str] | 
         _latest_pending_selection = None
         return None
 
-    import re
-    if isinstance(choice, int):
-        idx = choice
-    else:
-        m = re.match(r"^(?:window\s+)?(\d+)$", str(choice).strip(), re.IGNORECASE)
-        if not m:
-            return None
-        idx = int(m.group(1))
+    idx = parse_window_choice(choice)
+    if idx is None:
+        return None
 
     tokens = _latest_pending_selection.get("tokens", {})
     token_id = tokens.get(idx)
