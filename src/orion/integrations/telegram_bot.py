@@ -41,12 +41,14 @@ HELP_MESSAGE = (
     "• `/windows` — View open approved application windows\n"
     "• `/active` — View currently active approved application\n"
     "• `/apps` — View available approved Windows applications\n"
+    "• `/reminders` — View active personal reminders\n"
+    "• `/cancel_reminder <id>` — Cancel an active reminder\n"
     "• `/cancel` — Cancel pending execution proposals\n"
     "• `/plan <goal>` — Generate structured action plan\n"
     "• `/tasks` — View recent action plans\n"
     "• `/task <id>` — View details of a specific plan\n"
     "• `/reset` — Clear conversation history\n"
-    "\n*Window management (focus/minimize/maximize/restore) is done via natural language + confirmation.*"
+    "\n*Reminders and window management work via natural language or slash commands.*"
 )
 
 # Display names for action_type values used in history/status
@@ -274,6 +276,7 @@ def create_telegram_app(
     memory: ConversationMemory | None = None,
     tool_registry: ToolRegistry | None = None,
     transcriber: VoiceTranscriber | None = None,
+    scheduler: Any | None = None,
 ) -> Application:
     """Build and configure the Telegram application with handlers."""
     client = ollama_client or OllamaClient()
@@ -309,6 +312,49 @@ def create_telegram_app(
 
         if update.effective_message:
             await send_formatted_message(update.effective_message, HELP_MESSAGE)
+
+    async def reminders_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        active = conv_memory.get_active_reminders(owner_id)
+        from orion.core.reminders import format_reminder_list
+        reply = format_reminder_list(active, tz_name=settings.timezone)
+        await send_formatted_message(update.effective_message, reply)
+
+    async def cancel_reminder_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        args = context.args or []
+        if not args:
+            await send_formatted_message(
+                update.effective_message,
+                "Which reminder would you like to cancel? Usage: `/cancel_reminder <id>`. Send `/reminders` to view your active reminders.",
+            )
+            return
+
+        try:
+            rid = int(args[0].lstrip("#"))
+        except ValueError:
+            await send_formatted_message(
+                update.effective_message,
+                "Please provide a valid numeric reminder ID. Usage: `/cancel_reminder <id>`.",
+            )
+            return
+
+        rem = conv_memory.get_reminder(rid, user_id=owner_id)
+        success = conv_memory.cancel_reminder(rid, user_id=owner_id)
+        if success:
+            label = f" ('{rem['message']}')" if rem and rem.get("message") else ""
+            msg = f"✅ Reminder {rid}{label} has been cancelled."
+        else:
+            msg = f"Reminder {rid} was not found or is already cancelled."
+        await send_formatted_message(update.effective_message, msg)
 
     async def reset_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not is_authorized_owner(update, owner_id):
@@ -1463,7 +1509,53 @@ def create_telegram_app(
             except Exception:
                 pass
 
-    app = ApplicationBuilder().token(token).build()
+    async def deliver_reminder_message(target_user_id: int, reminder_text: str) -> None:
+        if target_user_id != owner_id:
+            return
+        try:
+            await app.bot.send_message(
+                chat_id=target_user_id,
+                text=markdown_to_telegram_html(reminder_text),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            try:
+                await app.bot.send_message(
+                    chat_id=target_user_id,
+                    text=clean_markdown_to_plain(reminder_text),
+                )
+            except Exception as err:
+                logger.error("Failed delivering reminder: %s", err)
+
+    from orion.core.reminders import ReminderScheduler
+
+    reminder_scheduler = scheduler or ReminderScheduler(
+        memory=conv_memory,
+        deliver_callback=deliver_reminder_message,
+        owner_id=owner_id,
+        check_interval=settings.reminder_check_interval_seconds,
+        timezone_name=settings.timezone,
+    )
+
+    async def _post_init(application: Application) -> None:
+        sched = application.bot_data.get("reminder_scheduler")
+        if sched:
+            sched.start()
+
+    async def _post_shutdown(application: Application) -> None:
+        sched = application.bot_data.get("reminder_scheduler")
+        if sched:
+            await sched.stop()
+
+    app = (
+        ApplicationBuilder()
+        .token(token)
+        .post_init(_post_init)
+        .post_shutdown(_post_shutdown)
+        .build()
+    )
+    app.bot_data["reminder_scheduler"] = reminder_scheduler
+
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("reset", reset_handler))
     app.add_handler(CommandHandler("plan", plan_handler))
@@ -1476,6 +1568,8 @@ def create_telegram_app(
     app.add_handler(CommandHandler("apps", apps_handler))
     app.add_handler(CommandHandler("windows", windows_handler))
     app.add_handler(CommandHandler("active", active_handler))
+    app.add_handler(CommandHandler("reminders", reminders_handler))
+    app.add_handler(CommandHandler("cancel_reminder", cancel_reminder_handler))
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CallbackQueryHandler(confirmation_callback_handler))
     app.add_handler(MessageHandler(filters.VOICE, voice_handler))

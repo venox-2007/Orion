@@ -140,6 +140,33 @@ class ConversationMemory:
                     ON execution_workflows(user_id)
                     """
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS reminders (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        message TEXT NOT NULL,
+                        scheduled_at REAL NOT NULL,
+                        recurrence TEXT,
+                        timezone TEXT NOT NULL DEFAULT 'Asia/Kolkata',
+                        status TEXT NOT NULL DEFAULT 'active',
+                        last_delivered_at REAL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_reminders_user_id
+                    ON reminders(user_id)
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_reminders_status_scheduled
+                    ON reminders(status, scheduled_at)
+                    """
+                )
                 # On startup/restart, safely mark any interrupted workflows
                 conn.execute(
                     "UPDATE execution_workflows SET status = 'interrupted' WHERE status = 'running'"
@@ -980,3 +1007,169 @@ class ConversationMemory:
 
         entries.sort(key=lambda x: (x["timestamp"], str(x.get("id", ""))), reverse=True)
         return entries[:limit]
+
+    # =========================================================================
+    # Step 17: Local Personal Reminders
+    # =========================================================================
+
+    def create_reminder(
+        self,
+        user_id: int,
+        message: str,
+        scheduled_at: float,
+        recurrence: str | None = None,
+        timezone: str = "Asia/Kolkata",
+    ) -> int:
+        """Create a new persistent reminder."""
+        with self._lock:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO reminders (user_id, message, scheduled_at, recurrence, timezone, status)
+                    VALUES (?, ?, ?, ?, ?, 'active')
+                    """,
+                    (user_id, message.strip(), float(scheduled_at), recurrence, timezone),
+                )
+                conn.commit()
+                return int(cur.lastrowid)
+
+    def get_reminder(self, reminder_id: int, user_id: int | None = None) -> dict[str, Any] | None:
+        """Fetch a specific reminder by ID, optionally scoped to user_id."""
+        with self._lock:
+            with self._get_connection() as conn:
+                if user_id is not None:
+                    cur = conn.execute(
+                        """
+                        SELECT id, user_id, message, scheduled_at, recurrence, timezone, status, last_delivered_at, created_at
+                        FROM reminders
+                        WHERE id = ? AND user_id = ?
+                        """,
+                        (reminder_id, user_id),
+                    )
+                else:
+                    cur = conn.execute(
+                        """
+                        SELECT id, user_id, message, scheduled_at, recurrence, timezone, status, last_delivered_at, created_at
+                        FROM reminders
+                        WHERE id = ?
+                        """,
+                        (reminder_id,),
+                    )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "user_id": row[1],
+                    "message": row[2],
+                    "scheduled_at": float(row[3]),
+                    "recurrence": row[4],
+                    "timezone": row[5],
+                    "status": row[6],
+                    "last_delivered_at": float(row[7]) if row[7] is not None else None,
+                    "created_at": row[8],
+                }
+
+    def get_active_reminders(self, user_id: int) -> list[dict[str, Any]]:
+        """Retrieve all active reminders for a user ordered by scheduled time."""
+        with self._lock:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT id, user_id, message, scheduled_at, recurrence, timezone, status, last_delivered_at, created_at
+                    FROM reminders
+                    WHERE user_id = ? AND status = 'active'
+                    ORDER BY scheduled_at ASC
+                    """,
+                    (user_id,),
+                )
+                rows = cur.fetchall()
+                return [
+                    {
+                        "id": r[0],
+                        "user_id": r[1],
+                        "message": r[2],
+                        "scheduled_at": float(r[3]),
+                        "recurrence": r[4],
+                        "timezone": r[5],
+                        "status": r[6],
+                        "last_delivered_at": float(r[7]) if r[7] is not None else None,
+                        "created_at": r[8],
+                    }
+                    for r in rows
+                ]
+
+    def get_due_reminders(self, now: float | None = None) -> list[dict[str, Any]]:
+        """Retrieve all active reminders that are due for delivery."""
+        check_time = now if now is not None else time.time()
+        with self._lock:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT id, user_id, message, scheduled_at, recurrence, timezone, status, last_delivered_at, created_at
+                    FROM reminders
+                    WHERE status = 'active' AND scheduled_at <= ?
+                    ORDER BY scheduled_at ASC
+                    """,
+                    (check_time,),
+                )
+                rows = cur.fetchall()
+                return [
+                    {
+                        "id": r[0],
+                        "user_id": r[1],
+                        "message": r[2],
+                        "scheduled_at": float(r[3]),
+                        "recurrence": r[4],
+                        "timezone": r[5],
+                        "status": r[6],
+                        "last_delivered_at": float(r[7]) if r[7] is not None else None,
+                        "created_at": r[8],
+                    }
+                    for r in rows
+                ]
+
+    def mark_reminder_delivered(
+        self,
+        reminder_id: int,
+        delivered_at: float,
+        next_scheduled_at: float | None = None,
+    ) -> bool:
+        """Mark reminder delivered and either complete it or advance its recurrence schedule atomically."""
+        with self._lock:
+            with self._get_connection() as conn:
+                if next_scheduled_at is not None:
+                    cur = conn.execute(
+                        """
+                        UPDATE reminders
+                        SET last_delivered_at = ?, scheduled_at = ?
+                        WHERE id = ? AND status = 'active'
+                        """,
+                        (float(delivered_at), float(next_scheduled_at), reminder_id),
+                    )
+                else:
+                    cur = conn.execute(
+                        """
+                        UPDATE reminders
+                        SET status = 'completed', last_delivered_at = ?
+                        WHERE id = ? AND status = 'active'
+                        """,
+                        (float(delivered_at), reminder_id),
+                    )
+                conn.commit()
+                return cur.rowcount > 0
+
+    def cancel_reminder(self, reminder_id: int, user_id: int) -> bool:
+        """Cancel an active reminder scoped to the user."""
+        with self._lock:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE reminders
+                    SET status = 'cancelled'
+                    WHERE id = ? AND user_id = ? AND status = 'active'
+                    """,
+                    (reminder_id, user_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0

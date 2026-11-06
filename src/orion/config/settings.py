@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     max_voice_duration_seconds: int = 60
     max_voice_file_size_bytes: int = 5 * 1024 * 1024  # 5 MB
 
+    # Reminders & timezone configuration (Step 17)
+    timezone: str = "Asia/Kolkata"
+    reminder_check_interval_seconds: float = 10.0
+
     def get_allowed_directories(self) -> list[Path]:
         """Return list of canonical resolved allowed directory paths."""
         if not self.allowed_directories or not self.allowed_directories.strip():

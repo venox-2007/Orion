@@ -1273,6 +1273,13 @@ async def route_and_execute_tool(
     if launch_res:
         return launch_res
 
+    # 4. Deterministic reminder commands (Step 17)
+    from orion.core.reminders import handle_reminder_text
+
+    reminder_res = handle_reminder_text(clean_text, context=context)
+    if reminder_res:
+        return reminder_res
+
     if ollama_client is None:
         from orion.integrations.ollama import OllamaClient
 
