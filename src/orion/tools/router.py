@@ -1168,6 +1168,7 @@ async def route_and_execute_tool(
                 active_wins = [w for w in app_windows if w.is_active]
                 if len(active_wins) != 1:
                     from orion.tools.desktop_inspector import create_window_tokens
+
                     act_short = tool_name.replace("_application_window", "")
                     options = create_window_tokens(app_id, app_windows, action=act_short)
                     sel_res = {

@@ -798,8 +798,23 @@ def create_telegram_app(
 
             # Check if user is replying with a choice to an active pending window selection
             if is_pending_window_selection_active():
-                pending_info = resolve_choice_to_pending(user_text)
-                if pending_info:
+                from orion.tools.desktop_inspector import get_latest_pending_selection, parse_window_choice
+
+                idx = parse_window_choice(user_text)
+                if idx is not None:
+                    pending_info = resolve_choice_to_pending(user_text)
+                    if not pending_info:
+                        latest = get_latest_pending_selection()
+                        num_opts = len(latest.get("tokens", {})) if latest else 2
+                        approved_apps = get_approved_apps()
+                        app_obj = approved_apps.get(latest.get("app_id", "")) if latest else None
+                        app_name = app_obj.display_name if app_obj else "application"
+                        invalid_msg = f"Please select a valid {app_name} window (1 to {num_opts})."
+                        await send_formatted_message(reply_target, invalid_msg)
+                        conv_memory.add_message(owner_id, "user", user_text)
+                        conv_memory.add_message(owner_id, "assistant", invalid_msg)
+                        return
+
                     app_id, action_type, token_id, label = pending_info
                     approved_apps = get_approved_apps()
                     app_obj = approved_apps.get(app_id)

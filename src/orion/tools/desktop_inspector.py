@@ -625,6 +625,39 @@ def _purge_expired_tokens() -> None:
         _window_tokens.pop(tid, None)
 
 
+def get_eligible_windows(windows: list[WindowInfo], action: str) -> list[WindowInfo]:
+    """Filter windows to those eligible for the requested action to avoid unnecessary clarification.
+
+    - For maximize: windows not already Maximized.
+    - For minimize: windows not already Minimized.
+    - For restore: windows not already in Normal state.
+    - For focus: all windows are potentially eligible; if exactly one is active or non-minimized, prefer it.
+    If filtering leaves no windows, returns the original list.
+    """
+    if not windows:
+        return []
+
+    act = (action or "focus").lower()
+    if act == "maximize":
+        eligible = [w for w in windows if w.state != "Maximized"]
+    elif act == "minimize":
+        eligible = [w for w in windows if w.state != "Minimized"]
+    elif act == "restore":
+        eligible = [w for w in windows if w.state != "Normal"]
+    elif act == "focus":
+        active = [w for w in windows if w.is_active]
+        if len(active) == 1:
+            return active
+        non_min = [w for w in windows if w.state != "Minimized"]
+        if len(non_min) == 1:
+            return non_min
+        eligible = windows
+    else:
+        eligible = windows
+
+    return eligible if eligible else windows
+
+
 def create_window_tokens(
     app_id: str,
     windows: list[WindowInfo],
@@ -643,6 +676,12 @@ def create_window_tokens(
         else:
             label_suffix = f"Window {idx}"
         label = f"{win.display_name} — {label_suffix}"
+        if getattr(win, "is_active", False):
+            label += " (Active)"
+        elif getattr(win, "state", None) == "Minimized":
+            label += " (Minimized)"
+        elif getattr(win, "state", None) == "Maximized":
+            label += " (Maximized)"
         tok = WindowToken(
             app_id=app_id,
             hwnd=win.hwnd,
@@ -676,7 +715,7 @@ def get_pending_window_token(app_id: str, index: int) -> str | None:
 
 
 ORDINAL_OR_WORD_TO_INDEX: dict[str, int] = {
-    "1": 1, "one": 1, "1st": 1, "first": 1, "main": 1,
+    "1": 1, "one": 1, "1st": 1, "first": 1, "main": 1, "primary": 1,
     "2": 2, "two": 2, "2nd": 2, "second": 2, "secondary": 2,
     "3": 3, "three": 3, "3rd": 3, "third": 3,
     "4": 4, "four": 4, "4th": 4, "fourth": 4,
@@ -695,6 +734,7 @@ def parse_window_choice(choice: str | int) -> int | None:
     - "first", "first one", "the first one", "1st", "1st one" -> 1
     - "second", "second one", "the second one", "2nd", "2nd one" -> 2
     - "choose 1", "pick the second one", "select window 2"
+    - "bring the main one to the front", "maximize window 1"
     """
     if isinstance(choice, int):
         return choice if choice > 0 else None
@@ -708,7 +748,14 @@ def parse_window_choice(choice: str | int) -> int | None:
         flags=re.IGNORECASE,
     ).strip()
     text = re.sub(
-        r"^(?:choose|pick|select|switch\s+to|focus|maximize|minimise|minimize|restore|bring\s+up|take)\s+",
+        r"^(?:choose|pick|select|switch\s+to|focus|maximize|minimise|minimize|restore|bring\s+up|bring|put|take)\s+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
+    # Strip trailing "to the front / foreground / up"
+    text = re.sub(
+        r"\s+(?:to\s+(?:the\s+)?(?:front|foreground)|up)[\.!\?]?$",
         "",
         text,
         flags=re.IGNORECASE,
