@@ -74,6 +74,10 @@ class VoiceTranscriber:
         if not os.path.exists(path_str):
             raise FileNotFoundError(f"Audio file not found: {path_str}")
 
+        if os.path.getsize(path_str) == 0:
+            logger.warning("Audio file is 0 bytes; returning empty transcription.")
+            return ""
+
         model = self.get_model()
         try:
             # Beam size 5 provides high accuracy for multilingual speech (English / Hindi-English)
@@ -89,11 +93,14 @@ class VoiceTranscriber:
             logger.error("Speech transcription error: %s", err)
             raise
 
-    async def transcribe_async(self, audio_path: str | Path) -> str:
+    async def transcribe_async(self, audio_path: str | Path, timeout: float = 30.0) -> str:
         """Transcribe an audio file asynchronously using bounded concurrency.
 
         Ensures only one transcription runs at a time and executes on a background
-        worker thread without blocking Telegram's event loop.
+        worker thread without blocking Telegram's event loop, guarded by a timeout.
         """
         async with self._async_lock:
-            return await asyncio.to_thread(self.transcribe, audio_path)
+            return await asyncio.wait_for(
+                asyncio.to_thread(self.transcribe, audio_path),
+                timeout=timeout,
+            )

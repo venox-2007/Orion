@@ -233,6 +233,37 @@ def interpret_voice_command(
                 "Could you please clarify which file or action you want to perform?",
             )
 
+    # 5. Ambiguous application name guard:
+    # If the voice command specifies an ambiguous application name (e.g. "open microsoft"),
+    # ask for clarification rather than guessing or executing an unintended app.
+    if is_app_cmd:
+        m_app = re.match(
+            r"^(?:(?:hey\s+|hi\s+)?orion[,\s]+)?(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?(open|launch|start|run|maximize|maximise|minimize|minimise|restore|focus|bring\s+(?:to\s+(?:the\s+)?front|up))\s+(.+)$",
+            normalized,
+            re.IGNORECASE,
+        )
+        if m_app:
+            action_verb = m_app.group(1).lower()
+            target_cand = m_app.group(2).strip().strip(" .!?\"'")
+            target_cand = re.sub(
+                r"(?i)\s+(?:on\s+my\s+laptop|on\s+my\s+pc|on\s+my\s+computer|on\s+windows|app|application|program)[\.!\?]?$",
+                "",
+                target_cand,
+            ).strip()
+
+            from orion.tools.app_launcher import find_matching_apps, get_approved_apps
+
+            matches = find_matching_apps(target_cand)
+            if len(matches) > 1:
+                approved = get_approved_apps()
+                names = [approved[aid].display_name for aid in matches if aid in approved]
+                act_label = "bring to the front" if "front" in action_verb or "up" in action_verb else action_verb
+                return (
+                    normalized,
+                    True,
+                    f"Multiple approved applications matched '{target_cand}': {', '.join(names)}. Which one would you like to {act_label}?",
+                )
+
     return normalized, False, None
 
 
@@ -1056,6 +1087,13 @@ def create_telegram_app(
             voice_file = await context.bot.get_file(voice.file_id)
             await voice_file.download_to_drive(temp_audio_path)
             transcribed_text = await voice_transcriber.transcribe_async(temp_audio_path)
+        except asyncio.TimeoutError:
+            logger.warning("Voice transcription timed out.")
+            await send_formatted_message(
+                update.effective_message,
+                "Voice processing timed out. Please try speaking again with a shorter message or send text.",
+            )
+            return
         except Exception as err:
             logger.error("Error transcribing voice note: %s", err)
             await send_formatted_message(
@@ -1073,8 +1111,17 @@ def create_telegram_app(
         raw_transcript = (transcribed_text or "").strip()
         logger.info("Voice transcription received (raw): %r", raw_transcript)
 
+        # Filter out Whisper non-speech artifacts: e.g. "[BLANK_AUDIO]", "[MUSIC]", "...", "(laughter)"
+        clean_speech = re.sub(r"\[.*?\]|\(.*?\)", "", raw_transcript).strip(" .!?\"'-")
+        if not clean_speech or not re.search(r"\w", clean_speech):
+            await send_formatted_message(
+                update.effective_message,
+                "I couldn't clearly understand that voice message. Please try speaking again or send a text message.",
+            )
+            return
+
         interpreted_text, is_ambiguous, clarification = interpret_voice_command(
-            raw_transcript,
+            clean_speech,
             recent_context={"owner_id": owner_id, "memory": conv_memory},
         )
 

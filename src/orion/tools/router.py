@@ -712,6 +712,17 @@ def check_deterministic_multi_action(clean_text: str) -> dict[str, Any] | None:
             raw_target = m_launch.group(1).strip()
             raw_target = re.sub(r"(?i)\s+(?:app|application|program)[\.!\?]?$", "", raw_target).strip(" .!?\"'")
 
+            # Ignore conversational phrases
+            conversational_words = {
+                "up", "down", "out", "away", "faster", "slower", "again", "over", "by", "with",
+                "your", "my", "our", "their", "his", "her", "me", "you", "us", "them",
+                "talking", "thinking", "explaining", "doing", "helping", "looking", "listening",
+                "conversation", "dialogue", "meeting", "discussion", "eyes", "door", "heart", "mind",
+            }
+            target_tokens = set(re.findall(r"\b\w+\b", raw_target.lower()))
+            if target_tokens & conversational_words:
+                return None
+
             seq = parse_sequential_command(raw_target)
             if seq:
                 app_cand, norm_act = seq
@@ -733,6 +744,9 @@ def check_deterministic_multi_action(clean_text: str) -> dict[str, Any] | None:
                 continue
 
             sub_targets = parse_multi_app_targets(raw_target)
+            if len(clauses) == 1 and len(sub_targets) < 2:
+                # Single target with no sequential action - delegate to check_deterministic_app_launch
+                return None
             for st in sub_targets:
                 st_clean = st.strip(" .!?\"'")
                 st_lower = st_clean.lower()
@@ -951,6 +965,17 @@ def check_deterministic_app_launch(
             "reply": "Which application would you like to launch? Send `/apps` to view the list of approved applications.",
         }
 
+    # Ignore ordinary conversational phrases starting with open/launch/start/run
+    conversational_words = {
+        "up", "down", "out", "away", "faster", "slower", "again", "over", "by", "with",
+        "your", "my", "our", "their", "his", "her", "me", "you", "us", "them",
+        "talking", "thinking", "explaining", "doing", "helping", "looking", "listening",
+        "conversation", "dialogue", "meeting", "discussion", "eyes", "door", "heart", "mind",
+    }
+    target_tokens = set(re.findall(r"\b\w+\b", raw_target.lower()))
+    if target_tokens & conversational_words:
+        return None
+
     if raw_target.lower() in PRONOUN_APP_TARGETS:
         resolved_app, reason = resolve_target_app_from_context(raw_target, context)
         if resolved_app:
@@ -1103,6 +1128,44 @@ def check_deterministic_app_launch(
     # 5. If query looks like an unapproved app launch attempt
     words = raw_target.split()
     if len(words) <= 4 and re.match(r"^[a-zA-Z0-9_\-\.\s]+$", raw_target):
+        # Exclude ordinary conversational phrases starting with open/launch/start/run
+        conversational_words = {
+            "up",
+            "down",
+            "out",
+            "away",
+            "faster",
+            "slower",
+            "again",
+            "over",
+            "by",
+            "with",
+            "your",
+            "my",
+            "our",
+            "their",
+            "his",
+            "her",
+            "talking",
+            "thinking",
+            "explaining",
+            "doing",
+            "helping",
+            "looking",
+            "listening",
+            "conversation",
+            "dialogue",
+            "meeting",
+            "discussion",
+            "eyes",
+            "door",
+            "heart",
+            "mind",
+        }
+        target_tokens = set(re.findall(r"\b\w+\b", raw_target.lower()))
+        if target_tokens & conversational_words:
+            return None
+
         return {
             "handled": True,
             "reply": f"Application '{raw_target}' is not in the approved application allowlist. ORION only has permission to launch 20 explicitly sanctioned applications. Send `/apps` to see the full list.",
