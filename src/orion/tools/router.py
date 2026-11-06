@@ -376,7 +376,56 @@ def resolve_app_or_clarification(target: str, action_desc: str = "open") -> tupl
     return None, None
 
 
-def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
+PRONOUN_APP_TARGETS = {
+    "it",
+    "that",
+    "this",
+    "the app",
+    "that app",
+    "the window",
+    "that window",
+    "app",
+    "window",
+    "",
+}
+
+
+def resolve_target_app_from_context(
+    candidate: str,
+    context: dict[str, Any] | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve a pronoun reference (e.g. 'it', 'that') to the last targeted approved app.
+
+    Returns:
+        (app_id, None) if resolved to an approved application.
+        (None, "expired" | "ambiguous" | "no_context") if resolution failed.
+    """
+    if candidate.strip().lower() not in PRONOUN_APP_TARGETS:
+        return None, None
+
+    if not context:
+        return None, "no_context"
+
+    if "recent_app_id" in context:
+        aid = context["recent_app_id"]
+        from orion.tools.app_launcher import APPROVED_APPLICATIONS
+
+        if aid in APPROVED_APPLICATIONS:
+            return aid, None
+        return None, "no_context"
+
+    mem = context.get("memory")
+    uid = context.get("user_id") if context.get("user_id") is not None else context.get("owner_id")
+    if mem and uid is not None and hasattr(mem, "get_last_targeted_app"):
+        return mem.get_last_targeted_app(uid)
+
+    return None, "no_context"
+
+
+def check_deterministic_window_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Deterministically check if text is asking about desktop windows, active app, or window management."""
     clean = clean_text.strip().lower()
     clean_no_punct = re.sub(r"[^\w\s]", "", clean).strip()
@@ -431,6 +480,15 @@ def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
         candidate = focus_match.group(1).strip()
         candidate = re.sub(r"^(?:the\s+|my\s+)", "", candidate).strip()
         candidate = re.sub(r"\s+(?:app|application)$", "", candidate).strip()
+        if candidate.lower() in PRONOUN_APP_TARGETS:
+            resolved_app, reason = resolve_target_app_from_context(candidate, context)
+            if resolved_app:
+                candidate = resolved_app
+            else:
+                return {
+                    "handled": True,
+                    "reply": "Which application would you like to bring to the front?",
+                }
         blocked, reason = is_app_blocked(candidate)
         if blocked:
             return {"handled": True, "reply": f"Application '{candidate}' is not in the approved application allowlist. {reason}"}
@@ -442,13 +500,22 @@ def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
 
     # Patterns for minimize
     minimize_match = re.search(
-        r"minimize\s+([a-zA-Z0-9_\s]+?)(?:\s+window)?[\s.!?]*$",
+        r"(?:minimize|minimise)\s+([a-zA-Z0-9_\s]+?)(?:\s+window)?[\s.!?]*$",
         clean,
     )
     if minimize_match:
         candidate = minimize_match.group(1).strip()
         candidate = re.sub(r"^(?:the\s+|my\s+)", "", candidate).strip()
         candidate = re.sub(r"\s+(?:app|application)$", "", candidate).strip()
+        if candidate.lower() in PRONOUN_APP_TARGETS:
+            resolved_app, reason = resolve_target_app_from_context(candidate, context)
+            if resolved_app:
+                candidate = resolved_app
+            else:
+                return {
+                    "handled": True,
+                    "reply": "Which application would you like to minimize?",
+                }
         blocked, reason = is_app_blocked(candidate)
         if blocked:
             return {"handled": True, "reply": f"Application '{candidate}' is not in the approved application allowlist. {reason}"}
@@ -460,13 +527,22 @@ def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
 
     # Patterns for maximize
     maximize_match = re.search(
-        r"maximize\s+([a-zA-Z0-9_\s]+?)(?:\s+window)?[\s.!?]*$",
+        r"(?:maximize|maximise)\s+([a-zA-Z0-9_\s]+?)(?:\s+window)?[\s.!?]*$",
         clean,
     )
     if maximize_match:
         candidate = maximize_match.group(1).strip()
         candidate = re.sub(r"^(?:the\s+|my\s+)", "", candidate).strip()
         candidate = re.sub(r"\s+(?:app|application)$", "", candidate).strip()
+        if candidate.lower() in PRONOUN_APP_TARGETS:
+            resolved_app, reason = resolve_target_app_from_context(candidate, context)
+            if resolved_app:
+                candidate = resolved_app
+            else:
+                return {
+                    "handled": True,
+                    "reply": "Which application would you like to maximize?",
+                }
         blocked, reason = is_app_blocked(candidate)
         if blocked:
             return {"handled": True, "reply": f"Application '{candidate}' is not in the approved application allowlist. {reason}"}
@@ -485,6 +561,15 @@ def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
         candidate = restore_match.group(1).strip()
         candidate = re.sub(r"^(?:the\s+|my\s+)", "", candidate).strip()
         candidate = re.sub(r"\s+(?:app|application)$", "", candidate).strip()
+        if candidate.lower() in PRONOUN_APP_TARGETS:
+            resolved_app, reason = resolve_target_app_from_context(candidate, context)
+            if resolved_app:
+                candidate = resolved_app
+            else:
+                return {
+                    "handled": True,
+                    "reply": "Which application would you like to restore?",
+                }
         blocked, reason = is_app_blocked(candidate)
         if blocked:
             return {"handled": True, "reply": f"Application '{candidate}' is not in the approved application allowlist. {reason}"}
@@ -504,7 +589,15 @@ def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
         candidate_app = match_status.group(1).strip()
         candidate_app = re.sub(r"^(?:the\s+|my\s+)", "", candidate_app)
         candidate_app = re.sub(r"\s+(?:window|windows|app|application)$", "", candidate_app).strip()
-
+        if candidate_app.lower() in PRONOUN_APP_TARGETS:
+            resolved_app, reason = resolve_target_app_from_context(candidate_app, context)
+            if resolved_app:
+                candidate_app = resolved_app
+            else:
+                return {
+                    "handled": True,
+                    "reply": "Which application window would you like to check?",
+                }
         blocked, reason = is_app_blocked(candidate_app)
         if blocked:
             return {
@@ -822,7 +915,10 @@ def check_deterministic_multi_action(clean_text: str) -> dict[str, Any] | None:
     }
 
 
-def check_deterministic_app_launch(clean_text: str) -> dict[str, Any] | None:
+def check_deterministic_app_launch(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Deterministically check if text is an imperative app launch, multi-app, or blocked app command.
 
     Avoids false positives in ordinary conversation while providing instant, reliable
@@ -854,6 +950,16 @@ def check_deterministic_app_launch(clean_text: str) -> dict[str, Any] | None:
             "handled": True,
             "reply": "Which application would you like to launch? Send `/apps` to view the list of approved applications.",
         }
+
+    if raw_target.lower() in PRONOUN_APP_TARGETS:
+        resolved_app, reason = resolve_target_app_from_context(raw_target, context)
+        if resolved_app:
+            raw_target = resolved_app
+        else:
+            return {
+                "handled": True,
+                "reply": "Which application would you like to launch? Send `/apps` to view the list of approved applications.",
+            }
 
     # 1. Sequential command check: e.g. "open calculator then maximize it", "calc and maximize it"
     seq = parse_sequential_command(raw_target)
@@ -1009,6 +1115,7 @@ async def route_and_execute_tool(
     user_text: str,
     ollama_client: OllamaClient | None = None,
     registry: ToolRegistry | None = None,
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Analyze user message for tool invocation, validate, and propose or execute at most one tool.
 
@@ -1028,7 +1135,7 @@ async def route_and_execute_tool(
         return multi_res
 
     # 2. Deterministic window and desktop query detection
-    win_query = check_deterministic_window_query(clean_text)
+    win_query = check_deterministic_window_query(clean_text, context=context)
     if win_query:
         if win_query.get("handled"):
             return win_query
@@ -1097,8 +1204,8 @@ async def route_and_execute_tool(
         reply = format_tool_result(tool_name, exec_res)
         return {"handled": True, "tool": tool_name, "result": exec_res, "reply": reply}
 
-    # 2. Deterministic app launch detection before model routing
-    launch_res = check_deterministic_app_launch(clean_text)
+    # 3. Deterministic app launch detection before model routing
+    launch_res = check_deterministic_app_launch(clean_text, context=context)
     if launch_res:
         return launch_res
 

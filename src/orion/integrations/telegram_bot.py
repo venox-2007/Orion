@@ -171,30 +171,53 @@ def interpret_voice_command(
             normalized = re.sub(pattern, repl, normalized, flags=re.IGNORECASE)
 
     # 3. Contextual pronoun resolution: e.g. "maximize it", "bring it to the front"
-    if recent_context:
-        recent_app = recent_context.get("recent_app_id")
-        if not recent_app and "memory" in recent_context and "owner_id" in recent_context:
-            mem = recent_context["memory"]
-            oid = recent_context["owner_id"]
-            if hasattr(mem, "get_recent_action_history"):
-                history = mem.get_recent_action_history(oid, limit=3)
-                for h in history:
-                    payload = h.get("payload") or {}
-                    if isinstance(payload, dict) and payload.get("app_id"):
-                        recent_app = payload["app_id"]
-                        break
-                    elif isinstance(payload, dict) and payload.get("target_app_id"):
-                        recent_app = payload["target_app_id"]
-                        break
+    m_pronoun = re.match(
+        r"^(?:(?:hey\s+|hi\s+)?orion[,\s]+)?(?:please\s+)?(maximize|maximise|minimize|minimise|restore|focus|bring\s+(?:it\s+|that\s+)?to\s+(?:the\s+)?(?:front|foreground)|switch\s+to)\s+(?:it|this|that|the\s+app|the\s+window|that\s+app|that\s+window)[\s.!?]*$",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if not m_pronoun:
+        m_pronoun = re.match(
+            r"^(?:(?:hey\s+|hi\s+)?orion[,\s]+)?(?:please\s+)?bring\s+(?:it|that|this)\s+(?:to\s+(?:the\s+)?(?:front|foreground)|up)[\s.!?]*$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        verb = "bring to the front" if m_pronoun else None
+    else:
+        raw_verb = m_pronoun.group(1).strip()
+        verb = "bring to the front" if "front" in raw_verb.lower() or "foreground" in raw_verb.lower() or raw_verb.lower() == "focus" else raw_verb.lower()
+
+    if verb:
+        recent_app = None
+        reason = "no_context"
+        if recent_context:
+            if "recent_app_id" in recent_context:
+                recent_app = recent_context["recent_app_id"]
+                reason = None
+            elif "memory" in recent_context and ("owner_id" in recent_context or "user_id" in recent_context):
+                mem = recent_context["memory"]
+                oid = recent_context.get("owner_id") if recent_context.get("owner_id") is not None else recent_context.get("user_id")
+                if hasattr(mem, "get_last_targeted_app"):
+                    recent_app, reason = mem.get_last_targeted_app(oid)
+                elif hasattr(mem, "get_recent_action_history"):
+                    history = mem.get_recent_action_history(oid, limit=3)
+                    for h in history:
+                        payload = h.get("payload") or {}
+                        if isinstance(payload, dict) and payload.get("app_id"):
+                            recent_app = payload["app_id"]
+                            break
+                        elif isinstance(payload, dict) and payload.get("target_app_id"):
+                            recent_app = payload["target_app_id"]
+                            break
+
         if recent_app:
-            m_pronoun = re.match(
-                r"^(?:(?:hey\s+|hi\s+)?orion[,\s]+)?(?:please\s+)?(maximize|minimize|restore|focus|bring\s+(?:it\s+)?to\s+(?:the\s+)?(?:front|foreground))\s+(?:it|this|that|the\s+app|the\s+window)[\s.!?]*$",
+            normalized = f"{verb} {recent_app}"
+        else:
+            return (
                 normalized,
-                flags=re.IGNORECASE,
+                True,
+                f"Which application would you like to {verb}?",
             )
-            if m_pronoun:
-                verb = m_pronoun.group(1).strip()
-                normalized = f"{verb} {recent_app}"
 
     # 4. Sensitive / Destructive operation guard:
     # Never silently change uncertain commands into destructive or sensitive operations.
@@ -751,6 +774,18 @@ def create_telegram_app(
 
     async def process_user_text(user_text: str, reply_target: Any) -> None:
         async with user_lock:
+            # Sensitive / Destructive operation guard for text commands
+            destructive_keywords = {"delete", "remove", "erase", "overwrite", "wipe", "format", "destroy", "truncate"}
+            words_in_text = set(re.findall(r"\b\w+\b", user_text.lower()))
+            if bool(destructive_keywords & words_in_text) and any(
+                w in words_in_text for w in ("that", "it", "this", "something", "everything", "all")
+            ):
+                clarif_msg = "Could you please clarify which file or action you want to perform?"
+                await send_formatted_message(reply_target, clarif_msg)
+                conv_memory.add_message(owner_id, "user", user_text)
+                conv_memory.add_message(owner_id, "assistant", clarif_msg)
+                return
+
             from orion.tools.desktop_inspector import (
                 clear_pending_window_selection,
                 create_window_tokens,
@@ -827,7 +862,12 @@ def create_telegram_app(
                     return
 
             # 1. Attempt natural-language tool routing first
-            tool_res = await route_and_execute_tool(user_text, ollama_client=client, registry=reg)
+            tool_res = await route_and_execute_tool(
+                user_text,
+                ollama_client=client,
+                registry=reg,
+                context={"user_id": owner_id, "owner_id": owner_id, "memory": conv_memory},
+            )
             if tool_res and tool_res.get("handled"):
                 if tool_res.get("requires_selection"):
                     windows = tool_res.get("windows", [])

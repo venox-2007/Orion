@@ -360,6 +360,10 @@ class ConversationMemory:
         result: dict[str, Any] | str | None = None,
     ) -> int:
         """Record executed or cancelled action outcome into action_history."""
+        if isinstance(payload, dict) and "_timestamp" not in payload:
+            payload = dict(payload)
+            payload["_timestamp"] = time.time()
+
         payload_serialized = json.dumps(payload)
         result_serialized = json.dumps(result) if result is not None else None
 
@@ -412,6 +416,95 @@ class ConversationMemory:
                 }
             )
         return history
+
+    def get_last_targeted_app(
+        self,
+        user_id: int,
+        max_age_seconds: float = 300.0,
+        now: float | None = None,
+    ) -> tuple[str | None, str | None]:
+        """Retrieve the last successfully targeted approved application for user within max_age_seconds.
+
+        Returns:
+            (app_id, None) if a single approved app was successfully targeted within max_age_seconds.
+            (None, "expired") if the last targeted app action was > max_age_seconds ago.
+            (None, "ambiguous") if multiple apps were targeted simultaneously in the latest action.
+            (None, "no_context") if no successful app action was found.
+        """
+        from orion.tools.app_launcher import APPROVED_APPLICATIONS
+
+        current_time = now if now is not None else time.time()
+
+        query = """
+            SELECT id, action_type, payload_json, status, result_json, executed_at
+            FROM action_history
+            WHERE user_id = ? AND status = 'success'
+            ORDER BY id DESC
+            LIMIT 10
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.execute(query, (user_id,))
+                rows = cursor.fetchall()
+
+        if not rows:
+            return None, "no_context"
+
+        for row in rows:
+            action_type = row[1]
+            try:
+                payload = json.loads(row[2])
+            except Exception:
+                payload = {}
+
+            app_candidates: list[str] = []
+            if action_type == "launch_application" or action_type in (
+                "focus_application_window",
+                "maximize_application_window",
+                "minimize_application_window",
+                "restore_application_window",
+            ):
+                aid = payload.get("app_id")
+                if aid and aid in APPROVED_APPLICATIONS:
+                    app_candidates.append(aid)
+            elif action_type == "composite_app_action":
+                target_aid = payload.get("target_app_id")
+                if target_aid and target_aid in APPROVED_APPLICATIONS:
+                    app_candidates.append(target_aid)
+                for aid in payload.get("app_ids", []):
+                    if aid in APPROVED_APPLICATIONS and aid not in app_candidates:
+                        app_candidates.append(aid)
+                for a in payload.get("actions", []):
+                    if isinstance(a, dict):
+                        aid = a.get("app_id")
+                        if aid and aid in APPROVED_APPLICATIONS and aid not in app_candidates:
+                            app_candidates.append(aid)
+
+            if not app_candidates:
+                continue
+
+            action_ts = payload.get("_timestamp")
+            if action_ts is None:
+                raw_exec = row[5]
+                if raw_exec:
+                    try:
+                        from datetime import datetime, timezone
+                        dt = datetime.strptime(str(raw_exec), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                        action_ts = dt.timestamp()
+                    except Exception:
+                        action_ts = current_time
+                else:
+                    action_ts = current_time
+
+            if (current_time - action_ts) > max_age_seconds:
+                return None, "expired"
+
+            if len(app_candidates) > 1:
+                return None, "ambiguous"
+
+            return app_candidates[0], None
+
+        return None, "no_context"
 
     def create_execution_workflow(
         self,
