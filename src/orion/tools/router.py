@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 from orion.tools.app_launcher import (
     _get_short_display_name,
+    find_matching_apps,
     get_approved_apps,
     is_app_available,
     is_app_blocked,
@@ -354,6 +355,27 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
     return "Action completed successfully."
 
 
+def resolve_app_or_clarification(target: str, action_desc: str = "open") -> tuple[str | None, dict[str, Any] | None]:
+    """Resolve target to an approved app_id, or return a clarification response if ambiguous.
+
+    Returns:
+        (app_id, None) if exactly 1 match found.
+        (None, {"handled": True, "reply": ...}) if multiple approved apps are plausible.
+        (None, None) if 0 matches found.
+    """
+    matches = find_matching_apps(target)
+    if len(matches) == 1:
+        return matches[0], None
+    if len(matches) > 1:
+        approved = get_approved_apps()
+        names = [approved[aid].display_name for aid in matches if aid in approved]
+        return None, {
+            "handled": True,
+            "reply": f"Multiple approved applications matched '{target}': {', '.join(names)}. Which one would you like to {action_desc}?",
+        }
+    return None, None
+
+
 def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
     """Deterministically check if text is asking about desktop windows, active app, or window management."""
     clean = clean_text.strip().lower()
@@ -412,7 +434,9 @@ def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
         blocked, reason = is_app_blocked(candidate)
         if blocked:
             return {"handled": True, "reply": f"Application '{candidate}' is not in the approved application allowlist. {reason}"}
-        app_id = resolve_app_alias(candidate)
+        app_id, clarif = resolve_app_or_clarification(candidate, "bring to the front")
+        if clarif:
+            return clarif
         if app_id:
             return {"is_window_action": True, "tool": "focus_application_window", "arguments": {"app_id": app_id}}
 
@@ -428,7 +452,9 @@ def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
         blocked, reason = is_app_blocked(candidate)
         if blocked:
             return {"handled": True, "reply": f"Application '{candidate}' is not in the approved application allowlist. {reason}"}
-        app_id = resolve_app_alias(candidate)
+        app_id, clarif = resolve_app_or_clarification(candidate, "minimize")
+        if clarif:
+            return clarif
         if app_id:
             return {"is_window_action": True, "tool": "minimize_application_window", "arguments": {"app_id": app_id}}
 
@@ -444,7 +470,9 @@ def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
         blocked, reason = is_app_blocked(candidate)
         if blocked:
             return {"handled": True, "reply": f"Application '{candidate}' is not in the approved application allowlist. {reason}"}
-        app_id = resolve_app_alias(candidate)
+        app_id, clarif = resolve_app_or_clarification(candidate, "maximize")
+        if clarif:
+            return clarif
         if app_id:
             return {"is_window_action": True, "tool": "maximize_application_window", "arguments": {"app_id": app_id}}
 
@@ -460,7 +488,9 @@ def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
         blocked, reason = is_app_blocked(candidate)
         if blocked:
             return {"handled": True, "reply": f"Application '{candidate}' is not in the approved application allowlist. {reason}"}
-        app_id = resolve_app_alias(candidate)
+        app_id, clarif = resolve_app_or_clarification(candidate, "restore")
+        if clarif:
+            return clarif
         if app_id:
             return {"is_window_action": True, "tool": "restore_application_window", "arguments": {"app_id": app_id}}
 
@@ -482,7 +512,9 @@ def check_deterministic_window_query(clean_text: str) -> dict[str, Any] | None:
                 "reply": f"Application '{candidate_app}' is not in the approved application allowlist. {reason}",
             }
 
-        app_id = resolve_app_alias(candidate_app)
+        app_id, clarif = resolve_app_or_clarification(candidate_app, "check")
+        if clarif:
+            return clarif
         if app_id:
             return {"tool": "get_application_window_status", "arguments": {"app_id": app_id}}
 
@@ -593,7 +625,9 @@ def check_deterministic_multi_action(clean_text: str) -> dict[str, Any] | None:
                 blocked, reason = is_app_blocked(app_cand)
                 if blocked:
                     return {"handled": True, "reply": f"Application '{app_cand}' is not in the approved application allowlist. {reason}"}
-                aid = resolve_app_alias(app_cand)
+                aid, clarif = resolve_app_or_clarification(app_cand, norm_act)
+                if clarif:
+                    return clarif
                 if not aid:
                     return {"handled": True, "reply": f"Application '{app_cand}' is not in the approved application allowlist. ORION only has permission to launch 20 explicitly sanctioned applications. Send `/apps` to see the full list."}
                 disp = _get_short_display_name(aid)
@@ -617,7 +651,9 @@ def check_deterministic_multi_action(clean_text: str) -> dict[str, Any] | None:
                     blocked, reason = is_app_blocked(st_clean)
                     if blocked:
                         return {"handled": True, "reply": f"Application '{st_clean}' is not in the approved application allowlist. {reason}"}
-                    aid = resolve_app_alias(st_clean)
+                    aid, clarif = resolve_app_or_clarification(st_clean, "open")
+                    if clarif:
+                        return clarif
                     if not aid:
                         return {"handled": True, "reply": f"Application '{st_clean}' is not in the approved application allowlist. ORION only has permission to launch 20 explicitly sanctioned applications. Send `/apps` to see the full list."}
                 disp = _get_short_display_name(aid)
@@ -672,7 +708,9 @@ def check_deterministic_multi_action(clean_text: str) -> dict[str, Any] | None:
                 blocked, reason = is_app_blocked(raw_win_target)
                 if blocked:
                     return {"handled": True, "reply": f"Application '{raw_win_target}' is not in the approved application allowlist. {reason}"}
-                aid = resolve_app_alias(raw_win_target)
+                aid, clarif = resolve_app_or_clarification(raw_win_target, win_action)
+                if clarif:
+                    return clarif
                 if not aid:
                     return {"handled": True, "reply": f"Application '{raw_win_target}' is not in the approved application allowlist. ORION only has permission to launch 20 explicitly sanctioned applications. Send `/apps` to see the full list."}
 
@@ -825,7 +863,9 @@ def check_deterministic_app_launch(clean_text: str) -> dict[str, Any] | None:
         if blocked:
             return {"handled": True, "reply": f"Application '{app_cand}' is not in the approved application allowlist. {reason}"}
 
-        app_id = resolve_app_alias(app_cand)
+        app_id, clarif = resolve_app_or_clarification(app_cand, norm_action)
+        if clarif:
+            return clarif
         if not app_id:
             return {
                 "handled": True,
@@ -876,7 +916,9 @@ def check_deterministic_app_launch(clean_text: str) -> dict[str, Any] | None:
         # Resolve each target
         resolved_ids: list[str] = []
         for t in targets:
-            aid = resolve_app_alias(t)
+            aid, clarif = resolve_app_or_clarification(t, "open")
+            if clarif:
+                return clarif
             if not aid:
                 return {
                     "handled": True,
@@ -930,7 +972,9 @@ def check_deterministic_app_launch(clean_text: str) -> dict[str, Any] | None:
         }
 
     # 4. Check if approved application alias
-    app_id = resolve_app_alias(raw_target)
+    app_id, clarif = resolve_app_or_clarification(raw_target, "open")
+    if clarif:
+        return clarif
     if app_id:
         app = get_approved_apps()[app_id]
         is_avail, avail_msg, _ = is_app_available(app_id)

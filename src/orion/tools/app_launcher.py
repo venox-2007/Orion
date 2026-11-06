@@ -285,7 +285,7 @@ APPROVED_APPLICATIONS: dict[str, AppDefinition] = {
         category="Productivity",
         launch_type="win32",
         path_resolver=_resolve_powerpoint,
-        aliases=("powerpoint", "ppt", "microsoft powerpoint", "ms powerpoint", "slides"),
+        aliases=("powerpoint", "power point", "ppt", "microsoft powerpoint", "ms powerpoint", "slides"),
     ),
     "notepad": AppDefinition(
         app_id="notepad",
@@ -293,7 +293,7 @@ APPROVED_APPLICATIONS: dict[str, AppDefinition] = {
         category="Productivity",
         launch_type="win32",
         path_resolver=_resolve_notepad,
-        aliases=("notepad", "windows notepad", "text editor"),
+        aliases=("notepad", "note pad", "node pad", "not pad", "windows notepad", "text editor"),
     ),
     "calculator": AppDefinition(
         app_id="calculator",
@@ -301,7 +301,7 @@ APPROVED_APPLICATIONS: dict[str, AppDefinition] = {
         category="Productivity",
         launch_type="packaged",
         aumid_resolver=_resolve_calculator,
-        aliases=("calculator", "calc", "windows calculator"),
+        aliases=("calculator", "calc", "cal c", "call c", "cal see", "windows calculator"),
     ),
     "sticky_notes": AppDefinition(
         app_id="sticky_notes",
@@ -317,7 +317,7 @@ APPROVED_APPLICATIONS: dict[str, AppDefinition] = {
         category="Productivity",
         launch_type="win32",
         path_resolver=_resolve_file_explorer,
-        aliases=("file explorer", "explorer", "windows explorer", "my computer", "files"),
+        aliases=("file explorer", "explorer", "files explorer", "windows explorer", "my computer", "files"),
     ),
     # 2. DEVELOPMENT & AI (4 applications)
     "vscode": AppDefinition(
@@ -326,7 +326,7 @@ APPROVED_APPLICATIONS: dict[str, AppDefinition] = {
         category="Development & AI",
         launch_type="win32",
         path_resolver=_resolve_vscode,
-        aliases=("vs code", "vscode", "code", "visual studio code"),
+        aliases=("vs code", "vscode", "v s code", "we s code", "wee s code", "code", "visual studio code"),
     ),
     "antigravity_ide": AppDefinition(
         app_id="antigravity_ide",
@@ -455,18 +455,20 @@ def get_approved_apps() -> dict[str, AppDefinition]:
     return dict(APPROVED_APPLICATIONS)
 
 
-def resolve_app_alias(query: str) -> str | None:
-    """Resolve a user or model string to an approved app_id.
+def find_matching_apps(query: str) -> list[str]:
+    """Find all approved app_ids that match the query in an app-command context.
 
-    Returns the approved app_id if found, or None.
+    Returns a list of matching approved app_ids (0, 1, or multiple).
+    Strictly matches against the 20 approved applications only.
+    Never launches an unknown app through unrestricted fuzzy matching.
     """
     clean = re.sub(r"[^\w\s]", "", query).strip().lower()
     if not clean:
-        return None
+        return []
 
     # Reject if suspicious shell/URI characters were present
     if any(ch in query for ch in (";", "&", "|", "`", "$", "<", ">", "\\", "/", ":", "\n", "\r")):
-        return None
+        return []
 
     # Strip conversational prefixes: "the ", "my "
     clean = re.sub(r"^(?:the\s+|my\s+)", "", clean).strip()
@@ -474,38 +476,55 @@ def resolve_app_alias(query: str) -> str | None:
     # Strip common suffixes: " app", " application", " program", " window", " windows"
     clean = re.sub(r"\s+(?:app|application|program|window|windows)$", "", clean).strip()
 
-    # Direct match on app_id
+    # 1. Direct match on app_id
     if clean in APPROVED_APPLICATIONS:
-        return clean
+        return [clean]
 
-    # Match aliases and display names (exact)
+    # 2. Match aliases and display names (exact match)
+    exact_matches = []
     for app_id, app in APPROVED_APPLICATIONS.items():
         if clean == app.display_name.lower():
-            return app_id
-        for alias in app.aliases:
-            if clean == alias.lower():
-                return app_id
+            exact_matches.append(app_id)
+        elif any(clean == alias.lower() for alias in app.aliases):
+            exact_matches.append(app_id)
 
-    # Normalized space match (e.g. "vs code" vs "vscode")
+    if exact_matches:
+        return list(dict.fromkeys(exact_matches))
+
+    # 3. Normalized space match (e.g. "vs code" vs "vscode", "note pad" vs "notepad")
     clean_nospace = clean.replace(" ", "")
+    nospace_matches = []
     for app_id, app in APPROVED_APPLICATIONS.items():
         if clean_nospace == app.app_id.replace("_", ""):
-            return app_id
-        if clean_nospace == app.display_name.lower().replace(" ", ""):
-            return app_id
-        for alias in app.aliases:
-            if clean_nospace == alias.lower().replace(" ", ""):
-                return app_id
+            nospace_matches.append(app_id)
+        elif clean_nospace == app.display_name.lower().replace(" ", ""):
+            nospace_matches.append(app_id)
+        elif any(clean_nospace == alias.lower().replace(" ", "") for alias in app.aliases):
+            nospace_matches.append(app_id)
 
-    # Substring match only if clean is a substring of display_name or an alias
-    matches = set()
-    for app_id, app in APPROVED_APPLICATIONS.items():
-        if clean in app.display_name.lower() or any(clean in alias.lower() for alias in app.aliases):
-            matches.add(app_id)
+    if nospace_matches:
+        return list(dict.fromkeys(nospace_matches))
 
+    # 4. Substring match against approved allowlist only (query must be at least 3 chars)
+    if len(clean) >= 3:
+        sub_matches = set()
+        for app_id, app in APPROVED_APPLICATIONS.items():
+            if clean in app.display_name.lower() or any(clean in alias.lower() for alias in app.aliases):
+                sub_matches.add(app_id)
+        if sub_matches:
+            return sorted(list(sub_matches))
+
+    return []
+
+
+def resolve_app_alias(query: str) -> str | None:
+    """Resolve a user or model string to an approved app_id if unambiguous.
+
+    Returns the approved app_id if exactly one match is found, or None.
+    """
+    matches = find_matching_apps(query)
     if len(matches) == 1:
-        return next(iter(matches))
-
+        return matches[0]
     return None
 
 

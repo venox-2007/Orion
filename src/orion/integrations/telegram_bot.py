@@ -145,21 +145,30 @@ def interpret_voice_command(
             return str(idx), False, None
 
     # 2. Phonetic corrections & transcription slip normalization for approved apps & window verbs
+    # Strictly applied ONLY in app-command contexts (not ordinary conversation, file names, paths, or document contents)
+    is_app_cmd = bool(re.match(
+        r"^(?:(?:hey\s+|hi\s+)?orion[,\s]+)?(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?(open|launch|start|run|maximize|maximise|minimize|minimise|restore|focus|bring|switch|is|how\s+many)\b",
+        clean,
+        re.IGNORECASE,
+    ))
+
     normalized = clean
-    phonetic_subs = [
-        (r"\b(?:call\s*c|cal\s*c|cal\s*see)\b", "calc"),
-        (r"\bv\s*s\s*code\b", "vs code"),
-        (r"\b(?:we|wee)\s*s\s*code\b", "vs code"),
-        (r"\bnote\s+pad\b", "notepad"),
-        (r"\bnot\s+pad\b", "notepad"),
-        (r"\bpower\s+point\b", "powerpoint"),
-        (r"\btask\s+mgr\b", "task manager"),
-        (r"\bwindows\s+explorer\b", "file explorer"),
-        (r"\bmaximise\b", "maximize"),
-        (r"\bminimise\b", "minimize"),
-    ]
-    for pattern, repl in phonetic_subs:
-        normalized = re.sub(pattern, repl, normalized, flags=re.IGNORECASE)
+    if is_app_cmd:
+        phonetic_subs = [
+            (r"\b(?:call\s*c|cal\s*c|cal\s*see)\b", "calc"),
+            (r"\bv\s*s\s*code\b", "vs code"),
+            (r"\b(?:we|wee)\s*s\s*code\b", "vs code"),
+            (r"\bnode\s+pad\b", "notepad"),
+            (r"\bnote\s+pad\b", "notepad"),
+            (r"\bnot\s+pad\b", "notepad"),
+            (r"\bpower\s+point\b", "powerpoint"),
+            (r"\btask\s+mgr\b", "task manager"),
+            (r"\bwindows\s+explorer\b", "file explorer"),
+            (r"\bmaximise\b", "maximize"),
+            (r"\bminimise\b", "minimize"),
+        ]
+        for pattern, repl in phonetic_subs:
+            normalized = re.sub(pattern, repl, normalized, flags=re.IGNORECASE)
 
     # 3. Contextual pronoun resolution: e.g. "maximize it", "bring it to the front"
     if recent_context:
