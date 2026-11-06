@@ -527,6 +527,11 @@ class ReminderScheduler:
         self._running: bool = False
         self._lock = asyncio.Lock()
 
+    @property
+    def is_running(self) -> bool:
+        """Whether the reminder scheduler loop is currently active."""
+        return self._running and self._task is not None and not self._task.done()
+
     def start(self) -> asyncio.Task:
         """Start the background reminder checking loop."""
         if self._running and self._task and not self._task.done():

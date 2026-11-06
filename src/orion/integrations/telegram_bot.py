@@ -1511,21 +1511,23 @@ def create_telegram_app(
 
     async def deliver_reminder_message(target_user_id: int, reminder_text: str) -> None:
         if target_user_id != owner_id:
-            return
+            raise PermissionError(f"Cannot deliver reminder to unauthorized user {target_user_id}")
         try:
             await app.bot.send_message(
                 chat_id=target_user_id,
                 text=markdown_to_telegram_html(reminder_text),
                 parse_mode=ParseMode.HTML,
             )
-        except Exception:
-            try:
-                await app.bot.send_message(
-                    chat_id=target_user_id,
-                    text=clean_markdown_to_plain(reminder_text),
-                )
-            except Exception as err:
-                logger.error("Failed delivering reminder: %s", err)
+        except Exception as html_err:
+            logger.warning(
+                "HTML formatting failed for reminder delivery, falling back to plain text: %s",
+                html_err,
+            )
+            # If plain text send also fails, this will raise and propagate failure to ReminderScheduler
+            await app.bot.send_message(
+                chat_id=target_user_id,
+                text=clean_markdown_to_plain(reminder_text),
+            )
 
     from orion.core.reminders import ReminderScheduler
 

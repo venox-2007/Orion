@@ -477,3 +477,140 @@ async def test_telegram_app_reminders_slash_commands(temp_memory):
 
     assert "reminders" in command_names
     assert "cancel_reminder" in command_names
+
+
+# ===========================================================================
+# 9. STEP 17.1: MANUAL LIFECYCLE & FAILURE PROPAGATION
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_fastapi_manual_lifecycle_invokes_post_init_and_post_shutdown(monkeypatch):
+    """FastAPI lifespan explicitly calls post_init and post_shutdown for manual PTB lifecycle."""
+    from orion.main import lifespan, app
+
+    mock_telegram_app = MagicMock()
+    mock_telegram_app.initialize = AsyncMock()
+    mock_telegram_app.post_init = AsyncMock()
+    mock_telegram_app.start = AsyncMock()
+    mock_telegram_app.updater = MagicMock()
+    mock_telegram_app.updater.running = True
+    mock_telegram_app.updater.start_polling = AsyncMock()
+    mock_telegram_app.updater.stop = AsyncMock()
+    mock_telegram_app.stop = AsyncMock()
+    mock_telegram_app.post_shutdown = AsyncMock()
+    mock_telegram_app.shutdown = AsyncMock()
+
+    mock_settings = MagicMock()
+    mock_settings.telegram_bot_token = "mock_token"
+    mock_settings.telegram_owner_id = 12345
+    mock_settings.app_name = "ORION"
+    mock_settings.debug = False
+
+    monkeypatch.setattr("orion.main.get_settings", lambda: mock_settings)
+    monkeypatch.setattr("orion.main.create_telegram_app", lambda token, owner_id: mock_telegram_app)
+
+    async with lifespan(app):
+        # Startup checks
+        mock_telegram_app.initialize.assert_awaited_once()
+        mock_telegram_app.post_init.assert_awaited_once_with(mock_telegram_app)
+        mock_telegram_app.start.assert_awaited_once()
+        mock_telegram_app.updater.start_polling.assert_awaited_once()
+
+    # Shutdown checks
+    mock_telegram_app.updater.stop.assert_awaited_once()
+    mock_telegram_app.stop.assert_awaited_once()
+    mock_telegram_app.post_shutdown.assert_awaited_once_with(mock_telegram_app)
+    mock_telegram_app.shutdown.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_real_telegram_app_scheduler_starts_via_post_init_and_stops_via_post_shutdown(temp_memory):
+    """Calling post_init and post_shutdown on real create_telegram_app controls scheduler lifecycle."""
+    owner_id = 888
+    app = create_telegram_app(
+        token="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+        owner_id=owner_id,
+        memory=temp_memory,
+    )
+    scheduler = app.bot_data["reminder_scheduler"]
+    assert scheduler.is_running is False
+
+    # 1. Trigger post_init
+    await app.post_init(app)
+    assert scheduler.is_running is True
+
+    # 2. Trigger post_shutdown
+    await app.post_shutdown(app)
+    assert scheduler.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_failed_send_propagates_and_reminder_remains_active(temp_memory):
+    """When Telegram send fails, failure propagates to scheduler and reminder is NOT marked delivered."""
+    owner_id = 888
+    sched_ts = time.time() - 5
+    rid = temp_memory.create_reminder(
+        user_id=owner_id,
+        message="Important meeting",
+        scheduled_at=sched_ts,
+    )
+
+    app = create_telegram_app(
+        token="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+        owner_id=owner_id,
+        memory=temp_memory,
+    )
+    # Mock bot.send_message to raise network exception
+    app.bot._frozen = False
+    app.bot.send_message = AsyncMock(side_effect=RuntimeError("Telegram network connection failed"))
+
+    scheduler = app.bot_data["reminder_scheduler"]
+    count = await scheduler.check_due_reminders(now=sched_ts + 10)
+
+    # Delivery failed: count must be 0
+    assert count == 0
+
+    # Reminder must remain ACTIVE in SQLite (not completed!)
+    rem = temp_memory.get_reminder(rid)
+    assert rem["status"] == "active"
+    assert rem["last_delivered_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_html_format_failure_falls_back_to_plain_text(temp_memory):
+    """When formatted send fails, plain text fallback delivers and marks reminder completed."""
+    owner_id = 888
+    sched_ts = time.time() - 5
+    rid = temp_memory.create_reminder(
+        user_id=owner_id,
+        message="Review <unclosed code",
+        scheduled_at=sched_ts,
+    )
+
+    app = create_telegram_app(
+        token="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+        owner_id=owner_id,
+        memory=temp_memory,
+    )
+
+    # First call (HTML) fails, second call (plain text) succeeds
+    app.bot._frozen = False
+    app.bot.send_message = AsyncMock(
+        side_effect=[Exception("Can't parse entities in message"), None]
+    )
+
+    scheduler = app.bot_data["reminder_scheduler"]
+    count = await scheduler.check_due_reminders(now=sched_ts + 10)
+
+    assert count == 1
+    assert app.bot.send_message.call_count == 2
+
+    # Second call must be plain text without parse_mode=HTML
+    second_call_kwargs = app.bot.send_message.call_args_list[1][1]
+    assert "parse_mode" not in second_call_kwargs or second_call_kwargs.get("parse_mode") != "HTML"
+
+    # Reminder is successfully marked completed
+    rem = temp_memory.get_reminder(rid)
+    assert rem["status"] == "completed"
+    assert rem["last_delivered_at"] is not None
+
