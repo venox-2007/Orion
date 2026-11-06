@@ -246,7 +246,7 @@ async def test_telegram_tool_message_flow(tmp_path) -> None:
     await message_handler_func(update_owner, context)
     update_owner.effective_message.reply_text.assert_called_once()
     reply = update_owner.effective_message.reply_text.call_args[0][0]
-    assert "System Resources" in reply
+    assert ("System Resources" in reply or "RAM usage" in reply)
     assert "RAM" in reply
     assert "{" not in reply  # No raw JSON returned to user
 

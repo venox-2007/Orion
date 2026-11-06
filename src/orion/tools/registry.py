@@ -22,7 +22,12 @@ from orion.tools.filesystem_actions import (
     move_file,
     rename_file,
 )
-from orion.tools.system import get_battery_status, get_system_resources
+from orion.tools.system import (
+    get_battery_status,
+    get_gpu_status,
+    get_system_overview,
+    get_system_resources,
+)
 
 logger = logging.getLogger("orion.tools")
 
@@ -156,6 +161,20 @@ class ToolRegistry:
             description="Retrieve current CPU, RAM, and disk utilization percentages.",
             args_schema=EmptyArgs,
             func=get_system_resources,
+            is_write_action=False,
+        )
+        self.register(
+            name="get_gpu_status",
+            description="Retrieve GPU utilization percentage, temperature, and VRAM.",
+            args_schema=EmptyArgs,
+            func=get_gpu_status,
+            is_write_action=False,
+        )
+        self.register(
+            name="get_system_overview",
+            description="Retrieve comprehensive system overview including CPU, RAM, Disk, Battery, and GPU.",
+            args_schema=EmptyArgs,
+            func=get_system_overview,
             is_write_action=False,
         )
         self.register(

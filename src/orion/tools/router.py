@@ -251,12 +251,33 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
         return f"**Battery:** {pct}%\n**Status:** {status_str}{time_str}"
 
     if tool_name == "get_system_resources":
-        return (
-            "**System Resources:**\n"
-            f"• **CPU:** {data.get('cpu_percent')}%\n"
-            f"• **RAM:** {data.get('ram_used_gb')} GB / {data.get('ram_total_gb')} GB ({data.get('ram_percent')}%)\n"
-            f"• **Disk:** {data.get('disk_used_gb')} GB / {data.get('disk_total_gb')} GB ({data.get('disk_percent')}%)"
-        )
+        cpu = data.get("cpu_percent")
+        ram_used = data.get("ram_used_gb")
+        ram_total = data.get("ram_total_gb")
+        ram_pct = data.get("ram_percent")
+        disk_used = data.get("disk_used_gb")
+        disk_free = data.get("disk_free_gb")
+        disk_total = data.get("disk_total_gb")
+        disk_pct = data.get("disk_percent")
+
+        lines = [
+            "**System Resources:**",
+            f"• **CPU:** {cpu}%",
+            f"• **RAM:** {ram_used}/{ram_total} GB ({ram_pct}%)",
+        ]
+        if disk_free is not None:
+            lines.append(f"• **Disk:** {disk_free} GB free / {disk_total} GB ({disk_pct}% used)")
+        else:
+            lines.append(f"• **Disk:** {disk_used} GB / {disk_total} GB ({disk_pct}%)")
+        return "\n".join(lines)
+
+    if tool_name == "get_system_overview":
+        from orion.tools.system import format_system_overview
+        return format_system_overview(data)
+
+    if tool_name == "get_gpu_status":
+        from orion.tools.system import format_gpu_status_natural
+        return format_gpu_status_natural(data)
 
     if tool_name == "list_files":
         dirname = data.get("directory", "")
@@ -340,7 +361,17 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
         return data.get("message", "The active application is not available to ORION.")
 
     if tool_name == "get_application_window_status":
-        return data.get("message", "Window status retrieved.")
+        disp = data.get("display_name", "Application")
+        if data.get("has_open_window"):
+            cnt = data.get("window_count", 1)
+            states = data.get("states", [])
+            state_counts: dict[str, int] = {}
+            for s in states:
+                state_counts[s] = state_counts.get(s, 0) + 1
+            state_str = ", ".join(f"{c} {st}" for st, c in state_counts.items()) if state_counts else "Normal"
+            active_tag = " [Active]" if data.get("is_active") else ""
+            return f"Yes, **{disp}** is currently running with {cnt} open window(s) ({state_str}){active_tag}."
+        return f"No, **{disp}** is not currently running."
 
     _WINDOW_MGMT_TOOLS = {
         "focus_application_window",
@@ -610,8 +641,176 @@ def check_deterministic_window_query(
             return clarif
         if app_id:
             return {"tool": "get_application_window_status", "arguments": {"app_id": app_id}}
+        return {
+            "handled": True,
+            "reply": f"Application '{candidate_app}' is not in the approved application allowlist. ORION can only monitor approved applications.",
+        }
 
     return None
+
+
+def check_deterministic_system_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check and answer questions about system resources, battery, GPU, and status (Step 18)."""
+    clean = clean_text.strip().lower()
+    clean_no_punct = re.sub(r"[^\w\s]", "", clean).strip()
+
+    # Conceptual / educational question exclusion: "what is a cpu", "how does a gpu work"
+    conceptual_prefixes = (
+        "what is a",
+        "what is an",
+        "what are",
+        "what does",
+        "how does a",
+        "how does the",
+        "how do",
+        "why do",
+        "why does",
+        "explain",
+        "define",
+        "difference between",
+    )
+    if any(clean_no_punct.startswith(p) for p in conceptual_prefixes):
+        return None
+
+    category = None
+
+    # 1. System overview: "how's my laptop doing", "system status", etc.
+    overview_patterns = (
+        "hows my laptop doing",
+        "how is my laptop doing",
+        "hows my pc doing",
+        "how is my pc doing",
+        "hows my computer doing",
+        "how is my computer doing",
+        "hows my computer",
+        "how is my computer",
+        "hows my laptop",
+        "how is my laptop",
+        "hows my pc",
+        "how is my pc",
+        "how is the laptop running",
+        "how is my laptop running",
+        "how is my pc running",
+        "how is my computer running",
+        "system status",
+        "laptop status",
+        "pc status",
+        "computer status",
+        "whats my system status",
+        "what is my system status",
+        "how is my system doing",
+        "how is my system",
+        "hows my system",
+    )
+    if any(clean_no_punct == p or clean_no_punct.startswith(p) for p in overview_patterns):
+        category = "overview"
+
+    # 2. CPU: "what's my cpu usage", "what is my cpu load", etc.
+    elif (
+        re.search(
+            r"\b(?:cpu\s+(?:usage|load|status)|(?:usage|load)\s+of\s+(?:the\s+|my\s+)?cpu|(?:my\s+)?cpu\s+doing)\b",
+            clean_no_punct,
+        )
+        or re.search(r"\bwhats\s+(?:my\s+|the\s+)?cpu\b", clean_no_punct)
+    ):
+        category = "cpu"
+
+    # 3. RAM / Memory: "how much ram am i using", "what's my ram usage", etc.
+    elif (
+        re.search(
+            r"\b(?:ram\s+(?:usage|status)|memory\s+usage|how\s+much\s+(?:ram|memory)|ram\s+(?:left|free))\b",
+            clean_no_punct,
+        )
+        or re.search(r"\bwhats\s+(?:my\s+|the\s+)?ram\b", clean_no_punct)
+    ):
+        category = "ram"
+
+    # 4. Storage / Disk: "how much storage is left", "storage free", etc.
+    elif (
+        re.search(
+            r"\b(?:storage|disk)\s+(?:free|left|usage|status|space)\b",
+            clean_no_punct,
+        )
+        or re.search(r"\bhow\s+much\s+(?:storage|disk\s+space)\b", clean_no_punct)
+    ):
+        category = "storage"
+
+    # 5. Charging status: "is my laptop charging", "is my pc plugged in", "is it charging"
+    elif re.search(
+        r"\b(?:is\s+(?:my\s+)?(?:laptop|pc|computer|it)\s+(?:charging|plugged\s+in))\b",
+        clean_no_punct,
+    ):
+        category = "charging"
+
+    # 6. Battery percentage / status: "what's my battery percentage", "how much battery is left"
+    elif re.search(
+        r"\b(?:battery\s+(?:percentage|status|level)|how\s+much\s+battery|whats\s+(?:my\s+)?battery)\b",
+        clean_no_punct,
+    ):
+        category = "battery"
+
+    # 7. GPU: "what's my gpu usage", "gpu status", "what's my gpu temperature"
+    elif (
+        re.search(
+            r"\b(?:gpu\s+(?:usage|load|status|temp|temperature)|(?:my\s+)?gpu\s+doing)\b",
+            clean_no_punct,
+        )
+        or re.search(r"\bwhats\s+(?:my\s+|the\s+)?gpu\b", clean_no_punct)
+    ):
+        category = "gpu"
+
+    if not category:
+        return None
+
+    # Owner authorization check
+    ctx = context or {}
+    user_id = ctx.get("user_id") or ctx.get("owner_id")
+    owner_id = ctx.get("owner_id")
+    if owner_id and user_id != owner_id:
+        return {"handled": True, "reply": "Access restricted: unauthorized user or chat."}
+
+    from orion.tools.system import (
+        format_battery_status_natural,
+        format_charging_status,
+        format_cpu_status,
+        format_gpu_status_natural,
+        format_ram_status,
+        format_storage_status,
+        format_system_overview,
+        get_battery_status,
+        get_gpu_status,
+        get_system_overview,
+        get_system_resources,
+    )
+
+    if category == "overview":
+        data = get_system_overview()
+        reply = format_system_overview(data)
+    elif category == "cpu":
+        data = get_system_resources()
+        reply = format_cpu_status(data)
+    elif category == "ram":
+        data = get_system_resources()
+        reply = format_ram_status(data)
+    elif category == "storage":
+        data = get_system_resources()
+        reply = format_storage_status(data)
+    elif category == "charging":
+        battery = get_battery_status()
+        reply = format_charging_status(battery)
+    elif category == "battery":
+        battery = get_battery_status()
+        reply = format_battery_status_natural(battery)
+    elif category == "gpu":
+        gpu = get_gpu_status()
+        reply = format_gpu_status_natural(gpu)
+    else:
+        return None
+
+    return {"handled": True, "reply": reply}
 
 
 SPLIT_CLAUSE_REGEX = re.compile(
@@ -1279,6 +1478,11 @@ async def route_and_execute_tool(
     reminder_res = handle_reminder_text(clean_text, context=context)
     if reminder_res:
         return reminder_res
+
+    # 5. Deterministic system resource queries (Step 18)
+    sys_res = check_deterministic_system_query(clean_text, context=context)
+    if sys_res:
+        return sys_res
 
     if ollama_client is None:
         from orion.integrations.ollama import OllamaClient
