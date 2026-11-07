@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from pathlib import Path
 import re
 from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -991,16 +992,39 @@ def create_telegram_app(
                         file_path = tool_res["file_path"]
                         caption = tool_res.get("caption", f"📄 {Path(file_path).name}")
                         try:
-                            from telegram.error import TelegramError
+                            file_stat = Path(file_path).stat()
+                            if file_stat.st_size > 48 * 1024 * 1024:
+                                file_size_mb = file_stat.st_size / (1024 * 1024)
+                                await send_formatted_message(
+                                    reply_target,
+                                    f"⚠️ <b>{Path(file_path).name}</b> is too large to send via Telegram ({file_size_mb:.1f} MB, limit is 50 MB).",
+                                )
+                                conv_memory.add_message(owner_id, "user", user_text)
+                                conv_memory.add_message(
+                                    owner_id,
+                                    "assistant",
+                                    f"⚠️ {Path(file_path).name} is too large to send via Telegram ({file_size_mb:.1f} MB, limit is 50 MB).",
+                                )
+                                return
+
+                            from telegram.error import TelegramError, TimedOut
 
                             if hasattr(reply_target, "reply_document"):
                                 with open(file_path, "rb") as doc:
-                                    await reply_target.reply_document(document=doc, caption=caption)
+                                    await reply_target.reply_document(
+                                        document=doc,
+                                        caption=caption,
+                                        read_timeout=60.0,
+                                        write_timeout=60.0,
+                                    )
                             else:
                                 await send_formatted_message(reply_target, caption)
+                        except (TimedOut, asyncio.TimeoutError) as timeout_err:
+                            logger.error("Document delivery timed out: %s", timeout_err)
+                            await send_formatted_message(reply_target, "⚠️ Document upload timed out. Please try again.")
                         except TelegramError as tg_err:
                             logger.error("Failed to deliver document via Telegram: %s", tg_err)
-                            await send_formatted_message(reply_target, "⚠️ File is too large to send via Telegram (limit is 50MB).")
+                            await send_formatted_message(reply_target, "⚠️ Failed to transmit file via Telegram.")
                         except Exception as doc_err:
                             logger.error("Failed to read/deliver document: %s", doc_err)
                             await send_formatted_message(reply_target, "⚠️ Unable to read or transmit file.")

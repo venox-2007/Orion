@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import difflib
 import logging
 import os
 from pathlib import Path
+import re
 
 logger = logging.getLogger("orion.tools.file_bridge")
 
@@ -166,6 +168,13 @@ def get_latest_file(
     return candidates[0][1].resolve()
 
 
+def _normalize_query(s: str) -> str:
+    """Normalize string by lowercasing, stripping non-alphanumeric chars, and collapsing consecutive identical letters."""
+    cleaned = re.sub(r"[^a-zA-Z0-9]", "", s.lower())
+    # Collapse consecutive identical letters (e.g. eaadhaar -> eadhar, eaadhar -> eadhar)
+    return re.sub(r"([a-z])\1+", r"\1", cleaned)
+
+
 def find_approved_file(
     filename: str,
     directory_alias: str | Path | None = None,
@@ -173,11 +182,12 @@ def find_approved_file(
 ) -> Path | None:
     """Find a specific file in the given alias or across approved directories.
 
-    Supports:
-    1. Exact filename matches.
-    2. Case-insensitive stem matching (e.g. "EAadhar" -> "EAadhar.pdf").
-    3. Case-insensitive prefix matching (e.g. "EAadhar" -> "EAadhar_00000.pdf").
-    4. Case-insensitive substring matching.
+    Cascading resolution:
+    1. Exact filename match (case-insensitive).
+    2. Exact stem match (e.g., stem.lower() == query.lower()).
+    3. Normalized match: _normalize_query(query) in _normalize_query(file.stem).
+    4. Prefix/Substring match: query.lower() in file.name.lower().
+    5. Fuzzy ratio match: SequenceMatcher(None, query.lower(), file.stem.lower()[:len(query)+5]).ratio() >= 0.70.
     """
     safe_name = os.path.basename(filename).strip()
     if not safe_name:
@@ -199,8 +209,10 @@ def find_approved_file(
 
     query_lower = safe_name.lower()
     query_stem_lower = Path(safe_name).stem.lower()
+    norm_query = _normalize_query(safe_name)
+    norm_stem_query = _normalize_query(Path(safe_name).stem)
 
-    # Pass 1: Exact filename match (case-insensitive)
+    valid_files: list[Path] = []
     for d in dirs_to_search:
         if not d.exists() or not d.is_dir():
             continue
@@ -211,85 +223,61 @@ def find_approved_file(
                         continue
                     if is_sensitive_file(f):
                         continue
-                    if f.name.lower() == query_lower:
-                        cand = f.resolve()
-                        if is_path_allowed(cand, extra_allowed=dirs_to_search):
-                            if max_bytes is not None and cand.stat().st_size > max_bytes:
-                                raise FileTooLargeError(cand, cand.stat().st_size)
-                            return cand
+                    cand = f.resolve()
+                    if is_path_allowed(cand, extra_allowed=dirs_to_search):
+                        valid_files.append(cand)
                 except (OSError, PermissionError):
                     continue
         except (OSError, PermissionError):
             continue
 
-    # Pass 2: Stem match (f.stem.lower() == query_stem_lower or f.stem.lower() == query_lower)
-    for d in dirs_to_search:
-        if not d.exists() or not d.is_dir():
-            continue
-        try:
-            for f in d.iterdir():
-                try:
-                    if not f.is_file():
-                        continue
-                    if is_sensitive_file(f):
-                        continue
-                    f_stem_lower = f.stem.lower()
-                    if f_stem_lower == query_stem_lower or f_stem_lower == query_lower:
-                        cand = f.resolve()
-                        if is_path_allowed(cand, extra_allowed=dirs_to_search):
-                            if max_bytes is not None and cand.stat().st_size > max_bytes:
-                                raise FileTooLargeError(cand, cand.stat().st_size)
-                            return cand
-                except (OSError, PermissionError):
-                    continue
-        except (OSError, PermissionError):
-            continue
+    def _return_or_raise(cand: Path) -> Path:
+        if max_bytes is not None and cand.stat().st_size > max_bytes:
+            raise FileTooLargeError(cand, cand.stat().st_size)
+        return cand
 
-    # Pass 3: Prefix match (f.name starts with query or f.stem starts with query_stem)
-    for d in dirs_to_search:
-        if not d.exists() or not d.is_dir():
-            continue
-        try:
-            for f in d.iterdir():
-                try:
-                    if not f.is_file():
-                        continue
-                    if is_sensitive_file(f):
-                        continue
-                    f_stem_lower = f.stem.lower()
-                    f_name_lower = f.name.lower()
-                    if f_stem_lower.startswith(query_stem_lower) or f_name_lower.startswith(query_lower):
-                        cand = f.resolve()
-                        if is_path_allowed(cand, extra_allowed=dirs_to_search):
-                            if max_bytes is not None and cand.stat().st_size > max_bytes:
-                                raise FileTooLargeError(cand, cand.stat().st_size)
-                            return cand
-                except (OSError, PermissionError):
-                    continue
-        except (OSError, PermissionError):
-            continue
+    # 1. Exact filename match (case-insensitive)
+    for f in valid_files:
+        if f.name.lower() == query_lower:
+            return _return_or_raise(f)
 
-    # Pass 4: Substring match
-    for d in dirs_to_search:
-        if not d.exists() or not d.is_dir():
-            continue
-        try:
-            for f in d.iterdir():
-                try:
-                    if not f.is_file():
-                        continue
-                    if is_sensitive_file(f):
-                        continue
-                    if query_stem_lower in f.stem.lower() or query_lower in f.name.lower():
-                        cand = f.resolve()
-                        if is_path_allowed(cand, extra_allowed=dirs_to_search):
-                            if max_bytes is not None and cand.stat().st_size > max_bytes:
-                                raise FileTooLargeError(cand, cand.stat().st_size)
-                            return cand
-                except (OSError, PermissionError):
-                    continue
-        except (OSError, PermissionError):
-            continue
+    # 2. Exact stem match
+    for f in valid_files:
+        f_stem_lower = f.stem.lower()
+        if f_stem_lower == query_stem_lower or f_stem_lower == query_lower:
+            return _return_or_raise(f)
+
+    # 3. Normalized match: _normalize_query(query) in _normalize_query(file.stem)
+    if norm_query or norm_stem_query:
+        for f in valid_files:
+            f_norm_stem = _normalize_query(f.stem)
+            if (norm_query and norm_query in f_norm_stem) or (norm_stem_query and norm_stem_query in f_norm_stem):
+                return _return_or_raise(f)
+
+    # 4. Prefix/Substring match: query.lower() in file.name.lower()
+    for f in valid_files:
+        f_name_lower = f.name.lower()
+        f_stem_lower = f.stem.lower()
+        if (
+            f_stem_lower.startswith(query_stem_lower)
+            or f_name_lower.startswith(query_lower)
+            or query_lower in f_name_lower
+            or query_stem_lower in f_stem_lower
+        ):
+            return _return_or_raise(f)
+
+    # 5. Fuzzy ratio match
+    best_fuzzy: tuple[float, Path] | None = None
+    prefix_len = len(query_lower) + 5
+    for f in valid_files:
+        target_sub = f.stem.lower()[:prefix_len]
+        ratio = difflib.SequenceMatcher(None, query_lower, target_sub).ratio()
+        if ratio >= 0.70:
+            if best_fuzzy is None or ratio > best_fuzzy[0]:
+                best_fuzzy = (ratio, f)
+
+    if best_fuzzy:
+        return _return_or_raise(best_fuzzy[1])
 
     return None
 

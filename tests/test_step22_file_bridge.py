@@ -259,3 +259,75 @@ def test_telegram_photo_handler_registered():
     handlers = [h for group in app.handlers.values() for h in group]
     photo_handlers = [h for h in handlers if hasattr(h, "filters") and "PHOTO" in str(h.filters)]
     assert len(photo_handlers) >= 1
+
+
+def test_find_approved_file_eaadhar_normalization(tmp_path):
+    """Verify find_approved_file('EAadhar') resolves EAadhaar_sample_unlocked.pdf."""
+    from orion.tools.file_bridge import find_approved_file
+
+    sample = tmp_path / "EAadhaar_sample_unlocked.pdf"
+    sample.write_bytes(b"%PDF-1.4 sample aadhar")
+
+    # Query with single 'a' in 'aadhar' resolves file with double 'a' ('aadhaar')
+    res = find_approved_file("EAadhar", directory_alias=tmp_path)
+    assert res is not None
+    assert res == sample.resolve()
+
+
+@pytest.mark.asyncio
+async def test_telegram_document_timeout_handling(tmp_path):
+    """Verify that network TimedOut errors on document delivery emit timeout warning and NOT 'file too large'."""
+    from orion.integrations.telegram_bot import create_telegram_app
+    from telegram.error import TimedOut
+
+    test_file = tmp_path / "test_doc.pdf"
+    test_file.write_bytes(b"content")
+
+    sent_messages = []
+
+    class DummyMessage:
+        def __init__(self):
+            self.chat = MagicMock()
+            self.chat.id = 12345
+            self.chat.type = "private"
+            self.text = "fetch test_doc.pdf"
+
+        async def reply_document(self, *args, **kwargs):
+            raise TimedOut("Network request timed out")
+
+        async def reply_text(self, text, *args, **kwargs):
+            sent_messages.append(text)
+
+    app = create_telegram_app(token="123456:dummy_test_token", owner_id=12345)
+    dummy_msg = DummyMessage()
+
+    tool_res = {
+        "handled": True,
+        "type": "document",
+        "file_path": str(test_file),
+        "caption": "📄 test_doc.pdf",
+    }
+
+    with patch("orion.integrations.telegram_bot.route_and_execute_tool", return_value=tool_res):
+        update = MagicMock()
+        update.effective_user.id = 12345
+        update.effective_chat.type = "private"
+        update.effective_chat.id = 12345
+        update.effective_message = dummy_msg
+        update.message.text = "fetch test_doc.pdf"
+
+        # Locate text message_handler
+        msg_handler = None
+        for group in app.handlers.values():
+            for h in group:
+                if hasattr(h, "filters") and "TEXT" in str(h.filters):
+                    msg_handler = h.callback
+                    break
+        assert msg_handler is not None
+
+        ctx = MagicMock()
+        ctx.bot.send_chat_action = AsyncMock()
+        await msg_handler(update, ctx)
+
+        assert any("timed out" in m.lower() for m in sent_messages)
+        assert not any("too large" in m.lower() for m in sent_messages)
