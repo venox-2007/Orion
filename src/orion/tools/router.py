@@ -1314,6 +1314,120 @@ def check_deterministic_file_fetch_query(
     return None
 
 
+def check_deterministic_process_and_power_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check for process management, power states, and web navigation (Step 23)."""
+    clean = clean_text.strip().rstrip(".?! ")
+    clean_lower = clean.lower()
+    clean_no_punct = re.sub(r"[^\w\s]", "", clean_lower).strip()
+
+    # Avoid capturing tasks or reminders
+    if clean_lower.startswith(("add ", "create ", "remind ", "task ", "delete task", "remove task")):
+        return None
+
+    # 1. Display & Screen Control
+    disp_pat = r"^(?:turn\s+off\s+(?:the\s+)?(?:screen|display|monitor)|screen\s+off|display\s+off)$"
+    if re.match(disp_pat, clean_lower) or re.match(disp_pat, clean_no_punct):
+        from orion.tools import workstation
+
+        workstation.turn_off_screen()
+        return {"handled": True, "reply": "🖥️ Display turned off."}
+
+    # 2. System Sleep Mode
+    sleep_pat = r"^(?:sleep(?:\s+(?:laptop|pc|computer))?|put\s+(?:laptop|pc|computer)\s+to\s+sleep)$"
+    if re.match(sleep_pat, clean_lower) or re.match(sleep_pat, clean_no_punct):
+        from orion.tools import workstation
+
+        workstation.sleep_system()
+        return {"handled": True, "reply": "💤 System putting itself to sleep."}
+
+    # 3. Web Search & Direct URL Navigation
+    # Direct URL
+    url_match = re.match(
+        r"^(?:open|go\s+to)\s+(https?://[^\s]+|[a-zA-Z0-9_\-]+\.(?:com|org|io|net|edu|dev|in|ai|gov|co|app|xyz)(?:/[^\s]*)?)$",
+        clean,
+        re.IGNORECASE,
+    )
+    if url_match:
+        from orion.tools import workstation
+
+        raw_url = url_match.group(1).strip()
+        full_url = raw_url if raw_url.startswith(("http://", "https://")) else f"https://{raw_url}"
+        workstation.open_browser_url(raw_url)
+        return {"handled": True, "reply": f"🌐 Opening <b>{full_url}</b> in default browser."}
+
+    # Web search
+    search_match = re.match(r"^(?:search\s+(?:for\s+)?|google\s+)(.+)$", clean, re.IGNORECASE)
+    if search_match:
+        from orion.tools import workstation
+
+        query_text = search_match.group(1).strip()
+        engine = "google"
+        display_engine = "Google"
+        yt_match = re.match(r"^(?:youtube\s+for\s+|on\s+youtube\s+)(.+)$", query_text, re.IGNORECASE) or re.match(
+            r"^(.+)\s+(?:on\s+youtube)$", query_text, re.IGNORECASE
+        )
+        if yt_match:
+            engine = "youtube"
+            display_engine = "YouTube"
+            query_text = yt_match.group(1).strip()
+
+        workstation.open_web_search(query_text, engine=engine)
+        return {"handled": True, "reply": f"🔍 Searching {display_engine} for: <i>{query_text}</i>"}
+
+    # 4. Top Processes / Resource Hogs
+    proc_pat1 = r"^(?:what(?:'s|\s+is)\s+eating\s+(?:my\s+)?(?:ram|memory|cpu)|top\s+(?:cpu|ram|memory)\s+processes?|what\s+processes?\s+are\s+running)$"
+    proc_pat2 = r"^(?:top\s+processes|list\s+processes|show\s+processes)$"
+    if (
+        re.match(proc_pat1, clean_lower)
+        or re.match(proc_pat1, clean_no_punct)
+        or re.match(proc_pat2, clean_lower)
+        or re.match(proc_pat2, clean_no_punct)
+    ):
+        from orion.tools import process_manager
+
+        metric = "ram" if ("ram" in clean_lower or "memory" in clean_lower) else "cpu"
+        procs = process_manager.get_top_resource_processes(metric=metric, limit=5)
+        reply = process_manager.format_top_processes(procs, metric=metric)
+        return {"handled": True, "reply": reply}
+
+    # 5. Safe Process Termination
+    term_match = re.match(r"^(?:close|kill|terminate|stop|exit)\s+([a-zA-Z0-9_\-\. ]+)$", clean, re.IGNORECASE)
+    if term_match:
+        target = term_match.group(1).strip()
+        target_lower = target.lower()
+        clean_target = re.sub(r"^(?:the\s+|my\s+)", "", target_lower).strip()
+
+        non_app_words = {
+            "window",
+            "windows",
+            "tab",
+            "tabs",
+            "playback",
+            "music",
+            "audio",
+            "task",
+            "tasks",
+            "reminder",
+            "reminders",
+            "screen",
+            "display",
+            "monitor",
+        }
+        if clean_target in non_app_words or clean_target.startswith(("task ", "reminder ")):
+            return None
+
+        from orion.tools import process_manager
+
+        is_force = clean_lower.startswith("kill")
+        success, reply_msg = process_manager.terminate_application(target, force=is_force)
+        return {"handled": True, "reply": reply_msg}
+
+    return None
+
+
 SPLIT_CLAUSE_REGEX = re.compile(
     r",\s*(?:and\s+)?then\s+"
     r"|\s+(?:and\s+)?then\s+"
@@ -1676,6 +1790,14 @@ def check_deterministic_app_launch(
     if target_tokens & conversational_words:
         return None
 
+    # Check if target is a web URL or domain (Step 23): let process & web navigation router handle it
+    if re.match(
+        r"^(?:https?://|[a-zA-Z0-9_\-]+\.(?:com|org|io|net|edu|dev|in|ai|gov|co|app|xyz)(?:/[^\s]*)?$)",
+        raw_target,
+        re.IGNORECASE,
+    ):
+        return None
+
     if raw_target.lower() in PRONOUN_APP_TARGETS:
         resolved_app, reason = resolve_target_app_from_context(raw_target, context)
         if resolved_app:
@@ -2009,6 +2131,11 @@ async def route_and_execute_tool(
     file_fetch_res = check_deterministic_file_fetch_query(clean_text, context=context)
     if file_fetch_res:
         return file_fetch_res
+
+    # 10. Deterministic process management, power states & web navigation (Step 23)
+    proc_power_res = check_deterministic_process_and_power_query(clean_text, context=context)
+    if proc_power_res:
+        return proc_power_res
 
     # Fast check: bypass LLM tool router for conceptual questions and basic chat greetings
     if should_bypass_llm_tool_router(clean_text):
