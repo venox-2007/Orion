@@ -907,7 +907,7 @@ def check_deterministic_task_query(
         if updated:
             return {
                 "handled": True,
-                "reply": f"🎉 Marked task #{task_id} (<b>{updated['title']}</b>) as completed!",
+                "reply": f"🎉 Marked task #{task_id} (*{updated['title']}*) as completed!",
             }
         return {
             "handled": True,
@@ -977,7 +977,7 @@ def check_deterministic_task_query(
             task = tasks.add_task(title=raw_title, priority=priority, memory=mem)
             return {
                 "handled": True,
-                "reply": f"✅ Added task: <b>{task['title']}</b> (Priority: {task['priority']}, ID: {task['id']})",
+                "reply": f"✅ Added task: *{task['title']}* (Priority: {task['priority']}, ID: {task['id']})",
             }
         except ValueError as err:
             return {

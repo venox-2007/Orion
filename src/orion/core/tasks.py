@@ -81,7 +81,7 @@ def format_task_list(
             return "Your task list is empty."
         return "You have no pending tasks! Great job."
 
-    lines = ["📋 <b>Your Tasks:</b>\n"]
+    lines = ["📋 *Your Tasks:*\n"]
     for t in tasks:
         tid = t["id"]
         title = t["title"]
@@ -89,13 +89,11 @@ def format_task_list(
         is_done = t.get("status") == "completed"
 
         if is_done:
-            lines.append(f"• <s>{title}</s> (Completed, ID: {tid})")
+            lines.append(f"• ~{title}~ (Completed, ID: {tid})")
         elif prio == "high":
-            lines.append(f"• [HIGH] <b>{title}</b> (ID: {tid})")
-        elif prio == "low":
-            lines.append(f"• [Low] {title} (ID: {tid})")
+            lines.append(f"• [HIGH] *{title}* (ID: {tid})")
         else:
             lines.append(f"• {title} (ID: {tid})")
 
-    lines.append("\n<i>Use 'complete task <id>' to mark a task as done.</i>")
+    lines.append("\n_Use 'complete task <id>' to mark a task as done._")
     return "\n".join(lines)

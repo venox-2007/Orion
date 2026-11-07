@@ -117,12 +117,17 @@ def test_task_formatting():
         {"id": 4, "title": "Call doctor", "priority": "normal", "status": "completed"},
     ]
     formatted = format_task_list(sample_tasks, show_completed=True)
-    assert "📋 <b>Your Tasks:</b>" in formatted
-    assert "• [HIGH] <b>Deploy hotfix</b> (ID: 1)" in formatted
+    assert "📋 *Your Tasks:*" in formatted
+    assert "• [HIGH] *Deploy hotfix* (ID: 1)" in formatted
     assert "• Buy milk (ID: 2)" in formatted
-    assert "• [Low] Read article (ID: 3)" in formatted
-    assert "• <s>Call doctor</s> (Completed, ID: 4)" in formatted
+    assert "• Read article (ID: 3)" in formatted
+    assert "• ~Call doctor~ (Completed, ID: 4)" in formatted
     assert "Use 'complete task <id>' to mark a task as done." in formatted
+    assert "<b" not in formatted
+    assert "<b>" not in formatted
+    assert "<i>" not in formatted
+    assert "<s" not in formatted
+    assert "<s>" not in formatted
 
 
 @pytest.mark.asyncio
@@ -134,27 +139,31 @@ async def test_deterministic_router_task_queries(temp_memory):
     res1 = await route_and_execute_tool("add task high priority: Finish assignment", context=ctx)
     assert res1 is not None
     assert res1.get("handled") is True
-    assert "✅ Added task: <b>Finish assignment</b> (Priority: high, ID: 1)" in res1["reply"]
+    assert "✅ Added task: *Finish assignment* (Priority: high, ID: 1)" in res1["reply"]
+    assert "<b" not in res1["reply"]
 
     # 2. Add task to buy groceries (normal priority)
     res2 = await route_and_execute_tool("add a task to buy groceries", context=ctx)
     assert res2 is not None
     assert res2.get("handled") is True
-    assert "✅ Added task: <b>buy groceries</b> (Priority: normal, ID: 2)" in res2["reply"]
+    assert "✅ Added task: *buy groceries* (Priority: normal, ID: 2)" in res2["reply"]
+    assert "<b" not in res2["reply"]
 
     # 3. Show my tasks
     res_list = await route_and_execute_tool("show my tasks", context=ctx)
     assert res_list is not None
     assert res_list.get("handled") is True
-    assert "📋 <b>Your Tasks:</b>" in res_list["reply"]
-    assert "• [HIGH] <b>Finish assignment</b> (ID: 1)" in res_list["reply"]
+    assert "📋 *Your Tasks:*" in res_list["reply"]
+    assert "• [HIGH] *Finish assignment* (ID: 1)" in res_list["reply"]
     assert "• buy groceries (ID: 2)" in res_list["reply"]
+    assert "<b" not in res_list["reply"]
 
     # 4. Complete task 1
     res_comp = await route_and_execute_tool("complete task 1", context=ctx)
     assert res_comp is not None
     assert res_comp.get("handled") is True
-    assert "🎉 Marked task #1 (<b>Finish assignment</b>) as completed!" in res_comp["reply"]
+    assert "🎉 Marked task #1 (*Finish assignment*) as completed!" in res_comp["reply"]
+    assert "<b" not in res_comp["reply"]
 
     # 5. Delete task 1
     res_del = await route_and_execute_tool("delete task 1", context=ctx)
