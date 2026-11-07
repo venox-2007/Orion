@@ -52,6 +52,19 @@ def get_system_resources() -> dict[str, Any]:
     }
 
 
+def _safe_float(val: str | None) -> float | None:
+    """Safely convert a string to float, returning None for N/A, [Not Supported], or errors."""
+    if not val:
+        return None
+    val_clean = val.strip().lower()
+    if val_clean in ("n/a", "na", "[not supported]", "not supported", "unknown", "none", ""):
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
+
+
 def get_gpu_status() -> dict[str, Any]:
     """Retrieve GPU utilization, temperature, and VRAM if supported local tools are available."""
     smi = shutil.which("nvidia-smi")
@@ -69,7 +82,7 @@ def get_gpu_status() -> dict[str, Any]:
                 "--format=csv,noheader,nounits",
             ],
             shell=False,
-            timeout=2.0,
+            timeout=5.0,
         ).decode().strip()
         if not out:
             return {
@@ -80,17 +93,24 @@ def get_gpu_status() -> dict[str, Any]:
         line = out.splitlines()[0]
         parts = [p.strip() for p in line.split(",")]
         if len(parts) >= 4:
-            used_mb = float(parts[2])
-            total_mb = float(parts[3])
-            return {
-                "available": True,
-                "gpu_percent": float(parts[0]),
-                "temperature_c": float(parts[1]),
-                "vram_used_mb": used_mb,
-                "vram_total_mb": total_mb,
-                "vram_used_gb": round(used_mb / 1024, 1),
-                "vram_total_gb": round(total_mb / 1024, 1),
-            }
+            gpu_pct = _safe_float(parts[0])
+            temp_c = _safe_float(parts[1])
+            used_mb = _safe_float(parts[2])
+            total_mb = _safe_float(parts[3])
+
+            # Return available: True if at least one metric parsed successfully
+            if any(m is not None for m in (gpu_pct, temp_c, used_mb, total_mb)):
+                used_gb = round(used_mb / 1024, 1) if used_mb is not None else None
+                total_gb = round(total_mb / 1024, 1) if total_mb is not None else None
+                return {
+                    "available": True,
+                    "gpu_percent": gpu_pct,
+                    "temperature_c": temp_c,
+                    "vram_used_mb": used_mb,
+                    "vram_total_mb": total_mb,
+                    "vram_used_gb": used_gb,
+                    "vram_total_gb": total_gb,
+                }
     except Exception as err:
         logger.debug("Failed querying GPU via nvidia-smi: %s", err)
 
@@ -152,10 +172,22 @@ def format_system_overview(data: dict[str, Any]) -> str:
 
     gpu = data.get("gpu", {})
     if gpu.get("available"):
-        gpu_pct = _fmt_pct(gpu.get("gpu_percent"))
+        gpu_pct = gpu.get("gpu_percent")
         temp = gpu.get("temperature_c")
-        temp_str = f"{int(round(temp)) if isinstance(temp, (int, float)) else temp}°C"
-        lines.append(f"GPU: {gpu_pct}, {temp_str}")
+        gpu_parts: list[str] = []
+        if gpu_pct is not None:
+            gpu_parts.append(_fmt_pct(gpu_pct))
+        if temp is not None:
+            temp_str = f"{int(round(temp)) if isinstance(temp, (int, float)) else temp}°C"
+            gpu_parts.append(temp_str)
+        if not gpu_parts:
+            used_gb = gpu.get("vram_used_gb")
+            total_gb = gpu.get("vram_total_gb")
+            if used_gb is not None and total_gb is not None:
+                gpu_parts.append(f"{used_gb}/{total_gb} GB VRAM")
+            else:
+                gpu_parts.append("Available")
+        lines.append(f"GPU: {', '.join(gpu_parts)}")
 
     return "\n".join(lines)
 
@@ -218,4 +250,17 @@ def format_gpu_status_natural(gpu: dict[str, Any]) -> str:
     temp = gpu.get("temperature_c")
     used = gpu.get("vram_used_gb")
     total = gpu.get("vram_total_gb")
-    return f"GPU: {pct}% utilization, {temp}°C, {used}/{total} GB VRAM used."
+
+    parts: list[str] = []
+    if pct is not None:
+        parts.append(f"{pct}% utilization")
+    if temp is not None:
+        parts.append(f"{temp}°C")
+    if used is not None and total is not None:
+        parts.append(f"{used}/{total} GB VRAM used")
+    elif used is not None:
+        parts.append(f"{used} GB VRAM used")
+
+    if not parts:
+        return "GPU is available, but specific metrics are not currently reporting."
+    return f"GPU: {', '.join(parts)}."
