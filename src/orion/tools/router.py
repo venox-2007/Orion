@@ -1126,6 +1126,25 @@ def check_deterministic_workstation_query(
         return execute_workstation_action("previous_track", context=context)
 
     # C. Volume controls
+    vol_exact_match = re.match(r"^(?:set\s+)?volume(?:\s+to)?\s+(\d{1,3})%?$", clean) or re.match(r"^(?:set\s+)?volume(?:\s+to)?\s+(\d{1,3})%?$", clean_no_punct)
+    if vol_exact_match:
+        lvl = int(vol_exact_match.group(1))
+        lvl = max(0, min(100, lvl))
+        from orion.tools import workstation
+
+        workstation.set_volume_percentage(lvl)
+        if context is not None and isinstance(context, dict):
+            context["last_action"] = {
+                "type": "workstation",
+                "action": "set_volume",
+                "level": lvl,
+                "timestamp": time.time(),
+            }
+        return {
+            "handled": True,
+            "reply": f"🔊 Volume set to {lvl}%.",
+        }
+
     mute_pattern = r"^(?:mute|unmute|toggle\s+mute)(?:\s+(?:volume|audio|sound|laptop))?$"
     if re.match(mute_pattern, clean) or re.match(mute_pattern, clean_no_punct):
         return execute_workstation_action("mute", context=context)
@@ -1168,10 +1187,100 @@ def check_deterministic_repeat_query(
     act_type = last_action.get("type")
     if act_type == "screenshot":
         return check_deterministic_screen_query("screenshot", context=context)
+    elif act_type == "file_fetch":
+        fp = last_action.get("file_path")
+        if fp and Path(fp).is_file():
+            p = Path(fp)
+            return {
+                "handled": True,
+                "type": "document",
+                "file_path": str(p),
+                "caption": f"📄 {p.name}",
+            }
     elif act_type == "workstation":
         act = last_action.get("action")
-        if act:
+        if act == "set_volume":
+            lvl = last_action.get("level", 50)
+            from orion.tools import workstation
+
+            workstation.set_volume_percentage(lvl)
+            last_action["timestamp"] = time.time()
+            return {"handled": True, "reply": f"🔊 Volume set to {lvl}%."}
+        elif act:
             return execute_workstation_action(act, context=context)
+
+    return None
+
+
+def check_deterministic_file_fetch_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check if query is requesting to fetch/send a file from laptop to Telegram (Step 22)."""
+    from orion.tools import file_bridge
+
+    clean = clean_text.strip().lower().rstrip(".?! ")
+
+    # Avoid capturing queries that are tasks, reminders, or workstation actions
+    if clean.startswith(("add ", "create ", "remind ", "task ", "delete ", "remove ", "lock ")):
+        return None
+
+    # 1. Latest file pattern
+    latest_pat = r"^(?:send|fetch|get)(?:\s+me)?\s+(?:the\s+)?latest(?:\s+([a-zA-Z0-9]+))?\s*(?:file|document)?(?:\s+from\s+(downloads|documents|desktop))?$"
+    m_latest = re.match(latest_pat, clean)
+    if m_latest:
+        raw_ext = m_latest.group(1)
+        ext = None if not raw_ext or raw_ext in ("file", "document") else raw_ext
+        dir_alias = m_latest.group(2) or "downloads"
+
+        file_path = file_bridge.get_latest_file(directory_alias=dir_alias, extension=ext)
+        if not file_path or not file_bridge.is_path_allowed(file_path):
+            return {
+                "handled": True,
+                "reply": "⚠️ File not found or access is restricted.",
+            }
+
+        if context is not None and isinstance(context, dict):
+            context["last_action"] = {
+                "type": "file_fetch",
+                "file_path": str(file_path),
+                "timestamp": time.time(),
+            }
+
+        return {
+            "handled": True,
+            "type": "document",
+            "file_path": str(file_path),
+            "caption": f"📄 {file_path.name}",
+        }
+
+    # 2. Specific file pattern
+    specific_pat = r"^(?:send|fetch|get)(?:\s+me)?\s+([a-zA-Z0-9_\-\. ]+\.[a-zA-Z0-9]+)(?:\s+from\s+(downloads|documents|desktop))?$"
+    m_specific = re.match(specific_pat, clean)
+    if m_specific:
+        filename = m_specific.group(1).strip()
+        dir_alias = m_specific.group(2)
+
+        file_path = file_bridge.find_approved_file(filename, directory_alias=dir_alias)
+        if not file_path or not file_bridge.is_path_allowed(file_path):
+            return {
+                "handled": True,
+                "reply": "⚠️ File not found or access is restricted.",
+            }
+
+        if context is not None and isinstance(context, dict):
+            context["last_action"] = {
+                "type": "file_fetch",
+                "file_path": str(file_path),
+                "timestamp": time.time(),
+            }
+
+        return {
+            "handled": True,
+            "type": "document",
+            "file_path": str(file_path),
+            "caption": f"📄 {file_path.name}",
+        }
 
     return None
 
@@ -1866,6 +1975,11 @@ async def route_and_execute_tool(
     workstation_res = check_deterministic_workstation_query(clean_text, context=context)
     if workstation_res:
         return workstation_res
+
+    # 9. Deterministic remote file fetch query (Step 22)
+    file_fetch_res = check_deterministic_file_fetch_query(clean_text, context=context)
+    if file_fetch_res:
+        return file_fetch_res
 
     # Fast check: bypass LLM tool router for conceptual questions and basic chat greetings
     if should_bypass_llm_tool_router(clean_text):

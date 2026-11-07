@@ -987,6 +987,27 @@ def create_telegram_app(
                         conv_memory.add_message(owner_id, "assistant", caption)
                         return
 
+                    if tool_res.get("type") == "document":
+                        file_path = tool_res["file_path"]
+                        caption = tool_res.get("caption", f"📄 {Path(file_path).name}")
+                        try:
+                            from telegram.error import TelegramError
+
+                            if hasattr(reply_target, "reply_document"):
+                                with open(file_path, "rb") as doc:
+                                    await reply_target.reply_document(document=doc, caption=caption)
+                            else:
+                                await send_formatted_message(reply_target, caption)
+                        except TelegramError as tg_err:
+                            logger.error("Failed to deliver document via Telegram: %s", tg_err)
+                            await send_formatted_message(reply_target, "⚠️ File is too large to send via Telegram (limit is 50MB).")
+                        except Exception as doc_err:
+                            logger.error("Failed to read/deliver document: %s", doc_err)
+                            await send_formatted_message(reply_target, "⚠️ Unable to read or transmit file.")
+                        conv_memory.add_message(owner_id, "user", user_text)
+                        conv_memory.add_message(owner_id, "assistant", caption)
+                        return
+
                     if tool_res.get("requires_selection"):
                         windows = tool_res.get("windows", [])
                         disp = tool_res.get("display_name") or tool_res.get("app_id", "Application").title()
@@ -1223,6 +1244,36 @@ def create_telegram_app(
             return
 
         await process_user_text(clean_text, update.effective_message)
+
+    async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle incoming file documents sent by authorized owner (Step 22 Drop Protocol)."""
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if not update.message or not update.message.document:
+            return
+
+        doc = update.message.document
+        file_name = doc.file_name or "received_file"
+
+        try:
+            from orion.tools import file_bridge
+
+            file_obj = await doc.get_file()
+            file_bytes = await file_obj.download_as_bytearray()
+            saved_path = file_bridge.save_incoming_file(bytes(file_bytes), file_name)
+            reply_msg = f"📥 *Saved file to laptop:*\n`{saved_path.name}`\nLocation: `{saved_path.parent}`"
+            await send_formatted_message(update.effective_message, reply_msg)
+            conv_memory.add_message(owner_id, "user", f"[Sent file: {file_name}]")
+            conv_memory.add_message(owner_id, "assistant", reply_msg)
+        except Exception as err:
+            logger.error("Failed to save incoming document '%s': %s", file_name, err)
+            await send_formatted_message(
+                update.effective_message,
+                f"⚠️ Failed to save incoming file '{file_name}'.",
+            )
 
     async def confirmation_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline button confirmation or cancellation for pending file actions."""
@@ -1614,6 +1665,7 @@ def create_telegram_app(
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CallbackQueryHandler(confirmation_callback_handler))
     app.add_handler(MessageHandler(filters.VOICE, voice_handler))
+    app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_error_handler(error_handler)
 

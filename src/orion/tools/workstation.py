@@ -62,3 +62,27 @@ def adjust_volume(direction: str, steps: int = 5) -> bool:
     for _ in range(max(1, steps)):
         _press_key(vk)
     return True
+
+
+def set_volume_percentage(level: int) -> bool:
+    """Set absolute system volume to a percentage (0-100)."""
+    level = max(0, min(100, int(level)))
+    try:
+        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+        from ctypes import cast, POINTER
+        from comtypes import CLSCTX_ALL
+
+        devices = AudioUtilities.GetSpeakers()
+        interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        volume = cast(interface, POINTER(IAudioEndpointVolume))
+        volume.SetMasterVolumeLevelScalar(level / 100.0, None)
+        return True
+    except Exception:
+        # Fallback with ctypes keybd_event:
+        # First zero out volume by pressing VK_VOLUME_DOWN 50 times (each step is 2%)
+        for _ in range(50):
+            _press_key(VK_VOLUME_DOWN)
+        # Then press VK_VOLUME_UP level // 2 times to reach the desired percentage
+        for _ in range(level // 2):
+            _press_key(VK_VOLUME_UP)
+        return True
