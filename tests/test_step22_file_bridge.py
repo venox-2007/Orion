@@ -1,8 +1,8 @@
-"""Unit tests for Step 22 — Remote File Bridge (Fetch & Drop Protocol) and Absolute Volume Control."""
+"""Unit tests for Step 22 & 22.1 — Remote File Bridge (Fetch & Drop Protocol), Absolute Volume Control, and Size Guards."""
 
 from pathlib import Path
 import os
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
@@ -75,6 +75,56 @@ def test_get_latest_file(tmp_path):
     # Pick newest overall when extension is None
     latest_any = get_latest_file(directory_alias=tmp_path)
     assert latest_any == f3.resolve()
+
+
+def test_get_latest_file_skips_large_files(tmp_path):
+    """Verify get_latest_file skips files exceeding max_bytes (50MB guard)."""
+    from orion.tools.file_bridge import get_latest_file
+
+    large_file = tmp_path / "giant_movie.mkv"
+    small_file = tmp_path / "document.pdf"
+
+    large_file.write_bytes(b"x")
+    small_file.write_bytes(b"y")
+
+    os.utime(small_file, (1000, 1000))
+    os.utime(large_file, (2000, 2000))
+
+    orig_stat = Path.stat
+
+    def mock_stat(self, *args, **kwargs):
+        st = orig_stat(self, *args, **kwargs)
+        if self.name == "giant_movie.mkv":
+            class MockStat:
+                st_mode = st.st_mode
+                st_mtime = 2000
+                st_size = 55 * 1024 * 1024
+            return MockStat()
+        return st
+
+    with patch.object(Path, "stat", mock_stat):
+        res = get_latest_file(directory_alias=tmp_path)
+        assert res == small_file.resolve()
+
+
+def test_find_approved_file_stem_and_substring(tmp_path):
+    """Verify find_approved_file matches stem/prefix/substring when exact name differs."""
+    from orion.tools.file_bridge import find_approved_file
+
+    aadhar_file = tmp_path / "EAadhar_9876543210.pdf"
+    aadhar_file.write_text("dummy aadhar content")
+
+    # 1. Match by stem without extension
+    res1 = find_approved_file("EAadhar", directory_alias=tmp_path)
+    assert res1 == aadhar_file.resolve()
+
+    # 2. Match by query with extension
+    res2 = find_approved_file("EAadhar.pdf", directory_alias=tmp_path)
+    assert res2 == aadhar_file.resolve()
+
+    # 3. Match by substring
+    res3 = find_approved_file("9876543210", directory_alias=tmp_path)
+    assert res3 == aadhar_file.resolve()
 
 
 def test_save_incoming_file_collision(tmp_path):
@@ -153,3 +203,59 @@ async def test_router_file_fetch(tmp_path):
         assert router_res.get("handled") is True
         assert router_res.get("type") == "document"
         assert router_res.get("file_path") == str(dummy_pdf)
+
+
+@pytest.mark.asyncio
+async def test_router_file_fetch_no_extension(tmp_path):
+    """Verify router handles file fetch queries without extension using stem matching."""
+    from orion.tools.router import check_deterministic_file_fetch_query, route_and_execute_tool
+
+    doc = tmp_path / "EAadhar_12345.pdf"
+    doc.write_bytes(b"pdf data")
+
+    with patch("orion.tools.file_bridge.find_approved_file", return_value=doc), \
+         patch("orion.tools.file_bridge.is_path_allowed", return_value=True):
+
+        # Query without extension
+        res = check_deterministic_file_fetch_query("fetch EAadhar", context={})
+        assert res is not None
+        assert res.get("handled") is True
+        assert res.get("type") == "document"
+        assert res.get("file_path") == str(doc)
+
+        router_res = await route_and_execute_tool("send the EAadhar from downloads", context={})
+        assert router_res is not None
+        assert router_res.get("handled") is True
+        assert router_res.get("type") == "document"
+
+
+@pytest.mark.asyncio
+async def test_router_file_too_large_error(tmp_path):
+    """Verify router returns a clear error message when file exceeds 48MB."""
+    from orion.tools.router import check_deterministic_file_fetch_query
+
+    big_doc = tmp_path / "huge_archive.zip"
+    big_doc.write_bytes(b"zip")
+
+    class MockStat:
+        st_size = 52 * 1024 * 1024  # 52 MB
+
+    with patch("orion.tools.file_bridge.find_approved_file", return_value=big_doc), \
+         patch("orion.tools.file_bridge.is_path_allowed", return_value=True), \
+         patch.object(Path, "stat", return_value=MockStat()):
+
+        res = check_deterministic_file_fetch_query("fetch huge_archive.zip", context={})
+        assert res is not None
+        assert res.get("handled") is True
+        assert "is too large to send via Telegram" in res["reply"]
+        assert "52.0 MB" in res["reply"]
+
+
+def test_telegram_photo_handler_registered():
+    """Verify photo handler is registered on filters.PHOTO in telegram bot app."""
+    from orion.integrations.telegram_bot import create_telegram_app
+
+    app = create_telegram_app(token="123456:dummy_test_token", owner_id=12345)
+    handlers = [h for group in app.handlers.values() for h in group]
+    photo_handlers = [h for h in handlers if hasattr(h, "filters") and "PHOTO" in str(h.filters)]
+    assert len(photo_handlers) >= 1

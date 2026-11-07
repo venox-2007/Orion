@@ -11,6 +11,20 @@ logger = logging.getLogger("orion.tools.file_bridge")
 # Sensitive extensions disallowed from remote transfer
 SENSITIVE_EXTENSIONS = {".env", ".pem", ".key", ".db", ".sqlite", ".sqlite3"}
 
+# Telegram file upload guard (bot limit is 50MB, guard threshold 48MB)
+MAX_FILE_BYTES = 48 * 1024 * 1024
+
+
+class FileTooLargeError(Exception):
+    """Raised when an approved file exceeds Telegram's upload limit."""
+
+    def __init__(self, path: Path, size_bytes: int):
+        self.path = path
+        self.size_bytes = size_bytes
+        super().__init__(
+            f"File '{path.name}' exceeds maximum upload size ({size_bytes / (1024 * 1024):.1f} MB, limit is 50 MB)."
+        )
+
 
 def get_approved_directories() -> list[Path]:
     """Return allowlisted base directories for file access in priority order."""
@@ -110,8 +124,9 @@ def validate_approved_path(
 def get_latest_file(
     directory_alias: str | Path = "downloads",
     extension: str | None = None,
+    max_bytes: int = MAX_FILE_BYTES,
 ) -> Path | None:
-    """Get the most recently modified file in the directory matching the extension."""
+    """Get the most recently modified file in the directory matching the extension and size limit."""
     target_dir = resolve_directory_alias(directory_alias)
     if not target_dir.exists() or not target_dir.is_dir():
         return None
@@ -135,7 +150,10 @@ def get_latest_file(
                     continue
                 if norm_ext and f.suffix.lower() != norm_ext:
                     continue
-                candidates.append((f.stat().st_mtime, f))
+                st = f.stat()
+                if max_bytes is not None and st.st_size > max_bytes:
+                    continue
+                candidates.append((st.st_mtime, f))
             except (OSError, PermissionError):
                 continue
     except (OSError, PermissionError):
@@ -151,8 +169,16 @@ def get_latest_file(
 def find_approved_file(
     filename: str,
     directory_alias: str | Path | None = None,
+    max_bytes: int | None = None,
 ) -> Path | None:
-    """Find a specific file in the given alias or across approved directories."""
+    """Find a specific file in the given alias or across approved directories.
+
+    Supports:
+    1. Exact filename matches.
+    2. Case-insensitive stem matching (e.g. "EAadhar" -> "EAadhar.pdf").
+    3. Case-insensitive prefix matching (e.g. "EAadhar" -> "EAadhar_00000.pdf").
+    4. Case-insensitive substring matching.
+    """
     safe_name = os.path.basename(filename).strip()
     if not safe_name:
         return None
@@ -164,17 +190,106 @@ def find_approved_file(
     if is_sensitive_file(safe_name):
         return None
 
+    dirs_to_search: list[Path] = []
     if directory_alias:
         target_dir = resolve_directory_alias(directory_alias)
-        candidate = (target_dir / safe_name).resolve()
-        if candidate.is_file() and is_path_allowed(candidate, extra_allowed=[target_dir]):
-            return candidate
-        return None
+        dirs_to_search = [target_dir]
+    else:
+        dirs_to_search = get_approved_directories()
 
-    for d in get_approved_directories():
-        candidate = (d / safe_name).resolve()
-        if candidate.is_file() and is_path_allowed(candidate):
-            return candidate
+    query_lower = safe_name.lower()
+    query_stem_lower = Path(safe_name).stem.lower()
+
+    # Pass 1: Exact filename match (case-insensitive)
+    for d in dirs_to_search:
+        if not d.exists() or not d.is_dir():
+            continue
+        try:
+            for f in d.iterdir():
+                try:
+                    if not f.is_file():
+                        continue
+                    if is_sensitive_file(f):
+                        continue
+                    if f.name.lower() == query_lower:
+                        cand = f.resolve()
+                        if is_path_allowed(cand, extra_allowed=dirs_to_search):
+                            if max_bytes is not None and cand.stat().st_size > max_bytes:
+                                raise FileTooLargeError(cand, cand.stat().st_size)
+                            return cand
+                except (OSError, PermissionError):
+                    continue
+        except (OSError, PermissionError):
+            continue
+
+    # Pass 2: Stem match (f.stem.lower() == query_stem_lower or f.stem.lower() == query_lower)
+    for d in dirs_to_search:
+        if not d.exists() or not d.is_dir():
+            continue
+        try:
+            for f in d.iterdir():
+                try:
+                    if not f.is_file():
+                        continue
+                    if is_sensitive_file(f):
+                        continue
+                    f_stem_lower = f.stem.lower()
+                    if f_stem_lower == query_stem_lower or f_stem_lower == query_lower:
+                        cand = f.resolve()
+                        if is_path_allowed(cand, extra_allowed=dirs_to_search):
+                            if max_bytes is not None and cand.stat().st_size > max_bytes:
+                                raise FileTooLargeError(cand, cand.stat().st_size)
+                            return cand
+                except (OSError, PermissionError):
+                    continue
+        except (OSError, PermissionError):
+            continue
+
+    # Pass 3: Prefix match (f.name starts with query or f.stem starts with query_stem)
+    for d in dirs_to_search:
+        if not d.exists() or not d.is_dir():
+            continue
+        try:
+            for f in d.iterdir():
+                try:
+                    if not f.is_file():
+                        continue
+                    if is_sensitive_file(f):
+                        continue
+                    f_stem_lower = f.stem.lower()
+                    f_name_lower = f.name.lower()
+                    if f_stem_lower.startswith(query_stem_lower) or f_name_lower.startswith(query_lower):
+                        cand = f.resolve()
+                        if is_path_allowed(cand, extra_allowed=dirs_to_search):
+                            if max_bytes is not None and cand.stat().st_size > max_bytes:
+                                raise FileTooLargeError(cand, cand.stat().st_size)
+                            return cand
+                except (OSError, PermissionError):
+                    continue
+        except (OSError, PermissionError):
+            continue
+
+    # Pass 4: Substring match
+    for d in dirs_to_search:
+        if not d.exists() or not d.is_dir():
+            continue
+        try:
+            for f in d.iterdir():
+                try:
+                    if not f.is_file():
+                        continue
+                    if is_sensitive_file(f):
+                        continue
+                    if query_stem_lower in f.stem.lower() or query_lower in f.name.lower():
+                        cand = f.resolve()
+                        if is_path_allowed(cand, extra_allowed=dirs_to_search):
+                            if max_bytes is not None and cand.stat().st_size > max_bytes:
+                                raise FileTooLargeError(cand, cand.stat().st_size)
+                            return cand
+                except (OSError, PermissionError):
+                    continue
+        except (OSError, PermissionError):
+            continue
 
     return None
 

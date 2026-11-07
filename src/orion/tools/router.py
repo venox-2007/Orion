@@ -1219,18 +1219,19 @@ def check_deterministic_file_fetch_query(
     """Deterministically check if query is requesting to fetch/send a file from laptop to Telegram (Step 22)."""
     from orion.tools import file_bridge
 
-    clean = clean_text.strip().lower().rstrip(".?! ")
+    clean = clean_text.strip().rstrip(".?! ")
+    clean_lower = clean.lower()
 
     # Avoid capturing queries that are tasks, reminders, or workstation actions
-    if clean.startswith(("add ", "create ", "remind ", "task ", "delete ", "remove ", "lock ")):
+    if clean_lower.startswith(("add ", "create ", "remind ", "task ", "delete ", "remove ", "lock ", "volume ", "turn ", "play", "pause", "skip", "mute", "unmute")):
         return None
 
     # 1. Latest file pattern
     latest_pat = r"^(?:send|fetch|get)(?:\s+me)?\s+(?:the\s+)?latest(?:\s+([a-zA-Z0-9]+))?\s*(?:file|document)?(?:\s+from\s+(downloads|documents|desktop))?$"
-    m_latest = re.match(latest_pat, clean)
+    m_latest = re.match(latest_pat, clean, re.IGNORECASE)
     if m_latest:
         raw_ext = m_latest.group(1)
-        ext = None if not raw_ext or raw_ext in ("file", "document") else raw_ext
+        ext = None if not raw_ext or raw_ext.lower() in ("file", "document") else raw_ext
         dir_alias = m_latest.group(2) or "downloads"
 
         file_path = file_bridge.get_latest_file(directory_alias=dir_alias, extension=ext)
@@ -1238,6 +1239,14 @@ def check_deterministic_file_fetch_query(
             return {
                 "handled": True,
                 "reply": "⚠️ File not found or access is restricted.",
+            }
+
+        st_size = file_path.stat().st_size
+        if st_size > file_bridge.MAX_FILE_BYTES:
+            file_size_mb = st_size / (1024 * 1024)
+            return {
+                "handled": True,
+                "reply": f"⚠️ <b>{file_path.name}</b> is too large to send via Telegram ({file_size_mb:.1f} MB, limit is 50 MB).",
             }
 
         if context is not None and isinstance(context, dict):
@@ -1254,18 +1263,38 @@ def check_deterministic_file_fetch_query(
             "caption": f"📄 {file_path.name}",
         }
 
-    # 2. Specific file pattern
-    specific_pat = r"^(?:send|fetch|get)(?:\s+me)?\s+([a-zA-Z0-9_\-\. ]+\.[a-zA-Z0-9]+)(?:\s+from\s+(downloads|documents|desktop))?$"
-    m_specific = re.match(specific_pat, clean)
+    # 2. Specific file pattern (with or without extension)
+    specific_pat = r"^(?:send|fetch|get)(?:\s+me)?\s+(?:the\s+)?([a-zA-Z0-9_\-\. ]+?)(?:\s+from\s+(downloads|documents|desktop))?$"
+    m_specific = re.match(specific_pat, clean, re.IGNORECASE)
     if m_specific:
         filename = m_specific.group(1).strip()
         dir_alias = m_specific.group(2)
 
-        file_path = file_bridge.find_approved_file(filename, directory_alias=dir_alias)
+        # Disallow non-file terms
+        if filename.lower() in ("screenshot", "screen capture", "desktop", "it", "that"):
+            return None
+
+        try:
+            file_path = file_bridge.find_approved_file(filename, directory_alias=dir_alias)
+        except file_bridge.FileTooLargeError as err:
+            mb = err.size_bytes / (1024 * 1024)
+            return {
+                "handled": True,
+                "reply": f"⚠️ <b>{err.path.name}</b> is too large to send via Telegram ({mb:.1f} MB, limit is 50 MB).",
+            }
+
         if not file_path or not file_bridge.is_path_allowed(file_path):
             return {
                 "handled": True,
                 "reply": "⚠️ File not found or access is restricted.",
+            }
+
+        st_size = file_path.stat().st_size
+        if st_size > file_bridge.MAX_FILE_BYTES:
+            file_size_mb = st_size / (1024 * 1024)
+            return {
+                "handled": True,
+                "reply": f"⚠️ <b>{file_path.name}</b> is too large to send via Telegram ({file_size_mb:.1f} MB, limit is 50 MB).",
             }
 
         if context is not None and isinstance(context, dict):

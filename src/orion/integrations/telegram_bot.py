@@ -1275,6 +1275,35 @@ def create_telegram_app(
                 f"⚠️ Failed to save incoming file '{file_name}'.",
             )
 
+    async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle incoming photos sent by authorized owner (Step 22.1 Drop Protocol)."""
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        if not update.message or not update.message.photo:
+            return
+
+        try:
+            from datetime import datetime
+            from orion.tools import file_bridge
+
+            photo_file = await update.message.photo[-1].get_file()
+            photo_bytes = await photo_file.download_as_bytearray()
+            filename = f"photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+            saved_path = file_bridge.save_incoming_file(bytes(photo_bytes), filename)
+            reply_msg = f"📥 *Saved photo to laptop:*\n`{saved_path.name}`\nLocation: `{saved_path.parent}`"
+            await send_formatted_message(update.effective_message, reply_msg)
+            conv_memory.add_message(owner_id, "user", f"[Sent photo: {filename}]")
+            conv_memory.add_message(owner_id, "assistant", reply_msg)
+        except Exception as err:
+            logger.error("Failed to save incoming photo: %s", err)
+            await send_formatted_message(
+                update.effective_message,
+                "⚠️ Failed to save incoming photo.",
+            )
+
     async def confirmation_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline button confirmation or cancellation for pending file actions."""
         query = update.callback_query
@@ -1665,6 +1694,7 @@ def create_telegram_app(
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CallbackQueryHandler(confirmation_callback_handler))
     app.add_handler(MessageHandler(filters.VOICE, voice_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_error_handler(error_handler)
