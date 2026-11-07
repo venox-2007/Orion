@@ -649,6 +649,61 @@ def check_deterministic_window_query(
     return None
 
 
+CONCEPTUAL_PREFIXES: tuple[str, ...] = (
+    "what is a",
+    "what is an",
+    "what are",
+    "what does",
+    "how does a",
+    "how does the",
+    "how does",
+    "how do",
+    "why do",
+    "why does",
+    "explain",
+    "define",
+    "difference between",
+)
+
+CONVERSATIONAL_GREETINGS: tuple[str, ...] = (
+    "hello",
+    "hi",
+    "hey",
+    "thanks",
+    "thank you",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "good night",
+    "how are you",
+    "how are you doing",
+    "whats up",
+    "what's up",
+    "bye",
+    "goodbye",
+)
+
+
+def should_bypass_llm_tool_router(clean_text: str) -> bool:
+    """Fast check to determine if text is conversational or conceptual and should bypass tool LLM routing."""
+    clean = clean_text.strip().lower()
+    clean_no_punct = re.sub(r"[^\w\s]", "", clean).strip()
+
+    if any(clean_no_punct.startswith(p) for p in CONCEPTUAL_PREFIXES):
+        return True
+
+    if clean_no_punct in CONVERSATIONAL_GREETINGS:
+        return True
+
+    words = clean_no_punct.split()
+    if any(clean_no_punct.startswith(g + " ") for g in ("hello", "hi", "hey", "good morning", "good evening", "good afternoon")):
+        action_words = {"open", "launch", "start", "run", "minimize", "maximize", "restore", "close", "remind", "delete", "create", "list", "find", "show"}
+        if not any(w in action_words for w in words):
+            return True
+
+    return False
+
+
 def check_deterministic_system_query(
     clean_text: str,
     context: dict[str, Any] | None = None,
@@ -658,21 +713,7 @@ def check_deterministic_system_query(
     clean_no_punct = re.sub(r"[^\w\s]", "", clean).strip()
 
     # Conceptual / educational question exclusion: "what is a cpu", "how does a gpu work"
-    conceptual_prefixes = (
-        "what is a",
-        "what is an",
-        "what are",
-        "what does",
-        "how does a",
-        "how does the",
-        "how do",
-        "why do",
-        "why does",
-        "explain",
-        "define",
-        "difference between",
-    )
-    if any(clean_no_punct.startswith(p) for p in conceptual_prefixes):
+    if any(clean_no_punct.startswith(p) for p in CONCEPTUAL_PREFIXES):
         return None
 
     category = None
@@ -1483,6 +1524,10 @@ async def route_and_execute_tool(
     sys_res = check_deterministic_system_query(clean_text, context=context)
     if sys_res:
         return sys_res
+
+    # Fast check: bypass LLM tool router for conceptual questions and basic chat greetings
+    if should_bypass_llm_tool_router(clean_text):
+        return None
 
     if ollama_client is None:
         from orion.integrations.ollama import OllamaClient

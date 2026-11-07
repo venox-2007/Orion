@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # Ollama configuration
     ollama_model: str = "qwen3.5:4b"
     ollama_base_url: str = "http://127.0.0.1:11434"
-    ollama_timeout: float = 60.0
+    ollama_timeout: float = 25.0
     ollama_plan_num_predict: int = 1024
 
     # Memory & storage configuration

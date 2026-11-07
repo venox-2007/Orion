@@ -953,112 +953,117 @@ def create_telegram_app(
                     conv_memory.add_message(owner_id, "assistant", result_msg)
                     return
 
-            # 1. Attempt natural-language tool routing first
-            tool_res = await route_and_execute_tool(
-                user_text,
-                ollama_client=client,
-                registry=reg,
-                context={"user_id": owner_id, "owner_id": owner_id, "memory": conv_memory},
-            )
-            if tool_res and tool_res.get("handled"):
-                if tool_res.get("requires_selection"):
-                    windows = tool_res.get("windows", [])
-                    disp = tool_res.get("display_name") or tool_res.get("app_id", "Application").title()
-                    act_type = tool_res.get("action_type", "focus")
-                    buttons = []
-                    for w in windows:
-                        b_idx = w["index"]
-                        b_lbl = w.get("label") or f"{disp} — Window {b_idx}"
-                        b_tok = w["token_id"]
-                        buttons.append([InlineKeyboardButton(f"{b_idx}. {b_lbl}", callback_data=f"win_sel:{b_tok}:{act_type}")])
-                    sel_keyboard = InlineKeyboardMarkup(buttons)
-                    reply_text = tool_res.get("reply", f"Which {disp} window?")
-                    try:
-                        await reply_target.reply_text(markdown_to_telegram_html(reply_text), parse_mode=ParseMode.HTML, reply_markup=sel_keyboard)
-                    except Exception:
-                        await reply_target.reply_text(clean_markdown_to_plain(reply_text), reply_markup=sel_keyboard)
-                    conv_memory.add_message(owner_id, "user", user_text)
-                    conv_memory.add_message(owner_id, "assistant", reply_text)
-                    return
-
-                if tool_res.get("is_workflow_proposal"):
-                    workflow_id = conv_memory.create_execution_workflow(
-                        user_id=owner_id,
-                        goal=tool_res["goal"],
-                        steps=tool_res["steps"],
-                        ttl_seconds=300,
-                    )
-                    proposal_text = tool_res.get("proposal_text", "")
-                    keyboard = InlineKeyboardMarkup(
-                        [
-                            [
-                                InlineKeyboardButton("Approve All", callback_data=f"wf_approve:{workflow_id}"),
-                                InlineKeyboardButton("Cancel", callback_data=f"wf_cancel:{workflow_id}"),
-                            ]
-                        ]
-                    )
-                    html_msg = markdown_to_telegram_html(proposal_text)
-                    try:
-                        await reply_target.reply_text(
-                            html_msg,
-                            parse_mode=ParseMode.HTML,
-                            reply_markup=keyboard,
-                        )
-                    except Exception:
-                        await reply_target.reply_text(
-                            clean_markdown_to_plain(proposal_text),
-                            reply_markup=keyboard,
-                        )
-                    conv_memory.add_message(owner_id, "user", user_text)
-                    conv_memory.add_message(owner_id, "assistant", proposal_text)
-                    return
-
-                if tool_res.get("is_proposal"):
-                    action_id = conv_memory.create_pending_action(
-                        user_id=owner_id,
-                        action_type=tool_res["action_type"],
-                        payload=tool_res["arguments"],
-                        ttl_seconds=300,
-                    )
-                    proposal_text = tool_res.get("proposal_text", "")
-                    keyboard = InlineKeyboardMarkup(
-                        [
-                            [
-                                InlineKeyboardButton("Confirm", callback_data=f"confirm:{action_id}"),
-                                InlineKeyboardButton("Cancel", callback_data=f"cancel:{action_id}"),
-                            ]
-                        ]
-                    )
-                    html_msg = markdown_to_telegram_html(proposal_text)
-                    try:
-                        await reply_target.reply_text(
-                            html_msg,
-                            parse_mode=ParseMode.HTML,
-                            reply_markup=keyboard,
-                        )
-                    except Exception:
-                        await reply_target.reply_text(
-                            clean_markdown_to_plain(proposal_text),
-                            reply_markup=keyboard,
-                        )
-                    conv_memory.add_message(owner_id, "user", user_text)
-                    conv_memory.add_message(owner_id, "assistant", proposal_text)
-                    return
-
-                reply_text = tool_res.get("reply", "")
-                conv_memory.add_message(owner_id, "user", user_text)
-                conv_memory.add_message(owner_id, "assistant", reply_text)
-            else:
-                # 2. Standard conversational flow with persistent memory
-                history = conv_memory.get_recent_messages(
-                    user_id=owner_id,
-                    limit=settings.max_history_messages,
+            reply_text = "Sorry, I took too long to process that request. Please try again."
+            try:
+                # 1. Attempt natural-language tool routing first
+                tool_res = await route_and_execute_tool(
+                    user_text,
+                    ollama_client=client,
+                    registry=reg,
+                    context={"user_id": owner_id, "owner_id": owner_id, "memory": conv_memory},
                 )
-                reply_text = await client.generate_response(user_text, history=history)
+                if tool_res and tool_res.get("handled"):
+                    if tool_res.get("requires_selection"):
+                        windows = tool_res.get("windows", [])
+                        disp = tool_res.get("display_name") or tool_res.get("app_id", "Application").title()
+                        act_type = tool_res.get("action_type", "focus")
+                        buttons = []
+                        for w in windows:
+                            b_idx = w["index"]
+                            b_lbl = w.get("label") or f"{disp} — Window {b_idx}"
+                            b_tok = w["token_id"]
+                            buttons.append([InlineKeyboardButton(f"{b_idx}. {b_lbl}", callback_data=f"win_sel:{b_tok}:{act_type}")])
+                        sel_keyboard = InlineKeyboardMarkup(buttons)
+                        reply_text = tool_res.get("reply", f"Which {disp} window?")
+                        try:
+                            await reply_target.reply_text(markdown_to_telegram_html(reply_text), parse_mode=ParseMode.HTML, reply_markup=sel_keyboard)
+                        except Exception:
+                            await reply_target.reply_text(clean_markdown_to_plain(reply_text), reply_markup=sel_keyboard)
+                        conv_memory.add_message(owner_id, "user", user_text)
+                        conv_memory.add_message(owner_id, "assistant", reply_text)
+                        return
 
-                if reply_text != OLLAMA_UNAVAILABLE_MESSAGE:
+                    if tool_res.get("is_workflow_proposal"):
+                        workflow_id = conv_memory.create_execution_workflow(
+                            user_id=owner_id,
+                            goal=tool_res["goal"],
+                            steps=tool_res["steps"],
+                            ttl_seconds=300,
+                        )
+                        proposal_text = tool_res.get("proposal_text", "")
+                        keyboard = InlineKeyboardMarkup(
+                            [
+                                [
+                                    InlineKeyboardButton("Approve All", callback_data=f"wf_approve:{workflow_id}"),
+                                    InlineKeyboardButton("Cancel", callback_data=f"wf_cancel:{workflow_id}"),
+                                ]
+                            ]
+                        )
+                        html_msg = markdown_to_telegram_html(proposal_text)
+                        try:
+                            await reply_target.reply_text(
+                                html_msg,
+                                parse_mode=ParseMode.HTML,
+                                reply_markup=keyboard,
+                            )
+                        except Exception:
+                            await reply_target.reply_text(
+                                clean_markdown_to_plain(proposal_text),
+                                reply_markup=keyboard,
+                            )
+                        conv_memory.add_message(owner_id, "user", user_text)
+                        conv_memory.add_message(owner_id, "assistant", proposal_text)
+                        return
+
+                    if tool_res.get("is_proposal"):
+                        action_id = conv_memory.create_pending_action(
+                            user_id=owner_id,
+                            action_type=tool_res["action_type"],
+                            payload=tool_res["arguments"],
+                            ttl_seconds=300,
+                        )
+                        proposal_text = tool_res.get("proposal_text", "")
+                        keyboard = InlineKeyboardMarkup(
+                            [
+                                [
+                                    InlineKeyboardButton("Confirm", callback_data=f"confirm:{action_id}"),
+                                    InlineKeyboardButton("Cancel", callback_data=f"cancel:{action_id}"),
+                                ]
+                            ]
+                        )
+                        html_msg = markdown_to_telegram_html(proposal_text)
+                        try:
+                            await reply_target.reply_text(
+                                html_msg,
+                                parse_mode=ParseMode.HTML,
+                                reply_markup=keyboard,
+                            )
+                        except Exception:
+                            await reply_target.reply_text(
+                                clean_markdown_to_plain(proposal_text),
+                                reply_markup=keyboard,
+                            )
+                        conv_memory.add_message(owner_id, "user", user_text)
+                        conv_memory.add_message(owner_id, "assistant", proposal_text)
+                        return
+
+                    reply_text = tool_res.get("reply", "")
                     conv_memory.add_message(owner_id, "user", user_text)
                     conv_memory.add_message(owner_id, "assistant", reply_text)
+                else:
+                    # 2. Standard conversational flow with persistent memory
+                    history = conv_memory.get_recent_messages(
+                        user_id=owner_id,
+                        limit=settings.max_history_messages,
+                    )
+                    reply_text = await client.generate_response(user_text, history=history)
+
+                    if reply_text != OLLAMA_UNAVAILABLE_MESSAGE:
+                        conv_memory.add_message(owner_id, "user", user_text)
+                        conv_memory.add_message(owner_id, "assistant", reply_text)
+            except Exception as err:
+                logger.warning("Error processing user text '%s': %s", user_text, err)
+                reply_text = "Sorry, I took too long to process that request. Please try again."
 
         await send_formatted_message(reply_target, reply_text)
 
@@ -1081,7 +1086,17 @@ def create_telegram_app(
                 action=ChatAction.TYPING,
             )
 
-        await process_user_text(user_text, update.effective_message)
+        try:
+            await process_user_text(user_text, update.effective_message)
+        except Exception as err:
+            logger.error("Unhandled exception in message_handler: %s", err)
+            if update.effective_message:
+                try:
+                    await update.effective_message.reply_text(
+                        "Sorry, I took too long to process that request. Please try again."
+                    )
+                except Exception:
+                    pass
 
     async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming Telegram voice notes with offline speech recognition."""

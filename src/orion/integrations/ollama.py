@@ -96,17 +96,20 @@ class OllamaClient:
         }
 
         url = f"{self.base_url}/api/chat"
+        timeout = 15.0
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(url, json=payload)
                 if response.status_code != 200:
-                    return None
+                    return {}
                 data = response.json()
                 raw_content = data.get("message", {}).get("content", "")
                 cleaned = clean_model_reply(raw_content)
                 if not cleaned:
-                    return None
+                    return {}
                 parsed = json.loads(cleaned)
-                return parsed if isinstance(parsed, dict) else None
+                return parsed if isinstance(parsed, dict) else {}
+        except (httpx.TimeoutException, httpx.RequestError):
+            return {}
         except Exception:
-            return None
+            return {}
