@@ -988,6 +988,53 @@ def check_deterministic_task_query(
     return None
 
 
+def check_deterministic_screen_query(clean_text: str) -> dict[str, Any] | None:
+    """Deterministically check if query is requesting a desktop screenshot capture (Step 20)."""
+    clean = clean_text.strip().lower()
+    clean_no_punct = re.sub(r"[^\w\s]", "", clean).strip()
+
+    # Avoid capturing queries that are about tasks, reminders, or file actions
+    if clean.startswith(("add", "create", "new", "delete", "remove", "mark", "complete", "remind")):
+        return None
+
+    screen_patterns = (
+        r"^(?:take\s+(?:a\s+)?)?screenshot$",
+        r"^(?:take\s+(?:a\s+)?|capture\s+(?:a\s+)?)?(?:screen|desktop)\s*(?:shot|snapshot|capture)?$",
+        r"^(?:show|what(?:s|'s|\s+is))\s+(?:on\s+my\s+|my\s+|the\s+|on\s+the\s+|on\s+)?(?:screen|desktop)$",
+        r"^see\s+(?:my\s+)?(?:screen|desktop)$",
+        r"^(?:send|give\s+me)\s+(?:a\s+)?(?:screenshot|screen\s+capture)$",
+    )
+
+    is_match = False
+    for pat in screen_patterns:
+        if re.match(pat, clean) or re.match(pat, clean_no_punct):
+            is_match = True
+            break
+
+    if not is_match:
+        return None
+
+    from orion.tools.screen_capture import ScreenCaptureError, take_desktop_screenshot
+    from datetime import datetime
+
+    try:
+        image_bytes = take_desktop_screenshot()
+        now_str = datetime.now().strftime("%I:%M %p").lstrip("0")
+        caption = f"📸 Desktop snapshot • {now_str}"
+        return {
+            "handled": True,
+            "type": "photo",
+            "photo_bytes": image_bytes,
+            "caption": caption,
+        }
+    except ScreenCaptureError as e:
+        logger.warning("Screen capture failed in router: %s", e)
+        return {
+            "handled": True,
+            "reply": "⚠️ Unable to capture screenshot. The screen might be locked or sleeping.",
+        }
+
+
 SPLIT_CLAUSE_REGEX = re.compile(
     r",\s*(?:and\s+)?then\s+"
     r"|\s+(?:and\s+)?then\s+"
@@ -1663,6 +1710,11 @@ async def route_and_execute_tool(
     task_res = check_deterministic_task_query(clean_text, context=context)
     if task_res:
         return task_res
+
+    # 7. Deterministic screen capture query (Step 20)
+    screen_res = check_deterministic_screen_query(clean_text)
+    if screen_res:
+        return screen_res
 
     # Fast check: bypass LLM tool router for conceptual questions and basic chat greetings
     if should_bypass_llm_tool_router(clean_text):

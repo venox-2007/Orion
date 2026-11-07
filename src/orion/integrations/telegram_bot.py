@@ -963,6 +963,21 @@ def create_telegram_app(
                     context={"user_id": owner_id, "owner_id": owner_id, "memory": conv_memory},
                 )
                 if tool_res and tool_res.get("handled"):
+                    if tool_res.get("type") == "photo":
+                        photo_bytes = tool_res["photo_bytes"]
+                        caption = tool_res.get("caption", "📸 Current Desktop")
+                        try:
+                            if hasattr(reply_target, "reply_photo"):
+                                await reply_target.reply_photo(photo=photo_bytes, caption=caption)
+                            else:
+                                await send_formatted_message(reply_target, caption)
+                        except Exception as photo_err:
+                            logger.error("Failed to deliver photo via Telegram: %s", photo_err)
+                            await send_formatted_message(reply_target, "⚠️ Failed to transmit screenshot via Telegram.")
+                        conv_memory.add_message(owner_id, "user", user_text)
+                        conv_memory.add_message(owner_id, "assistant", caption)
+                        return
+
                     if tool_res.get("requires_selection"):
                         windows = tool_res.get("windows", [])
                         disp = tool_res.get("display_name") or tool_res.get("app_id", "Application").title()
