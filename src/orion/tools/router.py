@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import time
 from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
@@ -988,7 +989,10 @@ def check_deterministic_task_query(
     return None
 
 
-def check_deterministic_screen_query(clean_text: str) -> dict[str, Any] | None:
+def check_deterministic_screen_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Deterministically check if query is requesting a desktop screenshot capture (Step 20)."""
     clean = clean_text.strip().lower()
     clean_no_punct = re.sub(r"[^\w\s]", "", clean).strip()
@@ -1021,6 +1025,11 @@ def check_deterministic_screen_query(clean_text: str) -> dict[str, Any] | None:
         image_bytes = take_desktop_screenshot()
         now_str = datetime.now().strftime("%I:%M %p").lstrip("0")
         caption = f"📸 Desktop snapshot • {now_str}"
+        if context is not None and isinstance(context, dict):
+            context["last_action"] = {
+                "type": "screenshot",
+                "timestamp": time.time(),
+            }
         return {
             "handled": True,
             "type": "photo",
@@ -1033,6 +1042,138 @@ def check_deterministic_screen_query(clean_text: str) -> dict[str, Any] | None:
             "handled": True,
             "reply": "⚠️ Unable to capture screenshot. The screen might be locked or sleeping.",
         }
+
+
+def execute_workstation_action(
+    action: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Execute a workstation session or media action and update context (Step 21)."""
+    from orion.tools import workstation
+
+    if action == "lock":
+        try:
+            workstation.lock_workstation()
+            reply = "🔒 Laptop locked successfully."
+        except Exception as e:
+            logger.warning("LockWorkStation failed: %s", e)
+            reply = "⚠️ Failed to lock workstation."
+    elif action == "toggle_play_pause":
+        workstation.toggle_play_pause()
+        reply = "⏯️ Toggled media playback."
+    elif action == "next_track":
+        workstation.next_track()
+        reply = "⏭️ Skipped to next track."
+    elif action == "previous_track":
+        workstation.previous_track()
+        reply = "⏮️ Returned to previous track."
+    elif action == "mute":
+        workstation.toggle_mute()
+        reply = "🔇 Toggled mute."
+    elif action == "volume_up":
+        workstation.adjust_volume("up", steps=5)
+        reply = "🔊 Volume increased."
+    elif action == "volume_down":
+        workstation.adjust_volume("down", steps=5)
+        reply = "🔉 Volume decreased."
+    else:
+        raise ValueError(f"Unknown workstation action: {action}")
+
+    if context is not None and isinstance(context, dict):
+        context["last_action"] = {
+            "type": "workstation",
+            "action": action,
+            "timestamp": time.time(),
+        }
+
+    return {
+        "handled": True,
+        "reply": reply,
+    }
+
+
+def check_deterministic_workstation_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check if query is a workstation lock or media/volume control command (Step 21)."""
+    clean = clean_text.strip().lower()
+    clean_no_punct = re.sub(r"[^\w\s]", "", clean).strip()
+
+    # Avoid capturing queries that are tasks, reminders, or file actions
+    if clean.startswith(("add ", "create ", "remind ", "task ", "delete ", "remove ")):
+        return None
+
+    # A. Lock workstation
+    lock_patterns = (
+        r"^(?:lock(?:\s+my)?\s+(?:laptop|pc|computer|screen|workstation)|lock\s+it|lock)$",
+    )
+    for pat in lock_patterns:
+        if re.match(pat, clean) or re.match(pat, clean_no_punct):
+            return execute_workstation_action("lock", context=context)
+
+    # B. Media controls
+    play_pause_pattern = r"^(?:play|pause|resume|toggle\s+playback|play\s+music|pause\s+music)$"
+    if re.match(play_pause_pattern, clean) or re.match(play_pause_pattern, clean_no_punct):
+        return execute_workstation_action("toggle_play_pause", context=context)
+
+    next_pattern = r"^(?:next(?:\s+track|\s+song)?|skip(?:\s+track|\s+song)?)$"
+    if re.match(next_pattern, clean) or re.match(next_pattern, clean_no_punct):
+        return execute_workstation_action("next_track", context=context)
+
+    prev_pattern = r"^(?:previous|prev)(?:\s+track|\s+song)?$"
+    if re.match(prev_pattern, clean) or re.match(prev_pattern, clean_no_punct):
+        return execute_workstation_action("previous_track", context=context)
+
+    # C. Volume controls
+    mute_pattern = r"^(?:mute|unmute|toggle\s+mute)(?:\s+(?:volume|audio|sound|laptop))?$"
+    if re.match(mute_pattern, clean) or re.match(mute_pattern, clean_no_punct):
+        return execute_workstation_action("mute", context=context)
+
+    vol_up_pattern = r"^(?:volume\s+up|increase\s+volume|turn\s+(?:it\s+)?up)$"
+    if re.match(vol_up_pattern, clean) or re.match(vol_up_pattern, clean_no_punct):
+        return execute_workstation_action("volume_up", context=context)
+
+    vol_down_pattern = r"^(?:volume\s+down|decrease\s+volume|turn\s+(?:it\s+)?down)$"
+    if re.match(vol_down_pattern, clean) or re.match(vol_down_pattern, clean_no_punct):
+        return execute_workstation_action("volume_down", context=context)
+
+    return None
+
+
+def check_deterministic_repeat_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check if query is requesting to repeat the previous action (Step 21)."""
+    clean = clean_text.strip().lower()
+    clean_no_punct = re.sub(r"[^\w\s]", "", clean).strip()
+
+    repeat_pattern = r"^(?:again|one\s+more|another(?:\s+one)?|repeat|do\s+it\s+again|retake)$"
+    if not (re.match(repeat_pattern, clean) or re.match(repeat_pattern, clean_no_punct)):
+        return None
+
+    if not context or not isinstance(context, dict):
+        return None
+
+    last_action = context.get("last_action")
+    if not isinstance(last_action, dict):
+        return None
+
+    ts = last_action.get("timestamp", 0)
+    # Context expiration window: 5 minutes (300 seconds)
+    if time.time() - ts > 300:
+        return None
+
+    act_type = last_action.get("type")
+    if act_type == "screenshot":
+        return check_deterministic_screen_query("screenshot", context=context)
+    elif act_type == "workstation":
+        act = last_action.get("action")
+        if act:
+            return execute_workstation_action(act, context=context)
+
+    return None
 
 
 SPLIT_CLAUSE_REGEX = re.compile(
@@ -1613,6 +1754,11 @@ async def route_and_execute_tool(
 
     reg = registry or default_tool_registry
 
+    # 0. Deterministic repeat follow-up query ("again", "one more", etc.) (Step 21)
+    repeat_res = check_deterministic_repeat_query(clean_text, context=context)
+    if repeat_res:
+        return repeat_res
+
     # 1. Deterministic multi-action and sequential command detection
     multi_res = check_deterministic_multi_action(clean_text)
     if multi_res:
@@ -1712,9 +1858,14 @@ async def route_and_execute_tool(
         return task_res
 
     # 7. Deterministic screen capture query (Step 20)
-    screen_res = check_deterministic_screen_query(clean_text)
+    screen_res = check_deterministic_screen_query(clean_text, context=context)
     if screen_res:
         return screen_res
+
+    # 8. Deterministic workstation & media control query (Step 21)
+    workstation_res = check_deterministic_workstation_query(clean_text, context=context)
+    if workstation_res:
+        return workstation_res
 
     # Fast check: bypass LLM tool router for conceptual questions and basic chat greetings
     if should_bypass_llm_tool_router(clean_text):

@@ -284,6 +284,7 @@ def create_telegram_app(
     reg = tool_registry or default_tool_registry
     settings = get_settings()
     user_lock = asyncio.Lock()
+    user_last_actions: dict[int, dict[str, Any]] = {}
 
     # Initialize offline voice transcriber if enabled
     voice_transcriber = transcriber
@@ -954,14 +955,22 @@ def create_telegram_app(
                     return
 
             reply_text = "Sorry, I took too long to process that request. Please try again."
+            ctx = {
+                "user_id": owner_id,
+                "owner_id": owner_id,
+                "memory": conv_memory,
+                "last_action": user_last_actions.get(owner_id),
+            }
             try:
                 # 1. Attempt natural-language tool routing first
                 tool_res = await route_and_execute_tool(
                     user_text,
                     ollama_client=client,
                     registry=reg,
-                    context={"user_id": owner_id, "owner_id": owner_id, "memory": conv_memory},
+                    context=ctx,
                 )
+                if ctx.get("last_action"):
+                    user_last_actions[owner_id] = ctx["last_action"]
                 if tool_res and tool_res.get("handled"):
                     if tool_res.get("type") == "photo":
                         photo_bytes = tool_res["photo_bytes"]
