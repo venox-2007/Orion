@@ -1,6 +1,7 @@
 """Persistent SQLite conversation memory and task plans for ORION."""
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 import threading
@@ -165,6 +166,28 @@ class ConversationMemory:
                     """
                     CREATE INDEX IF NOT EXISTS idx_reminders_status_scheduled
                     ON reminders(status, scheduled_at)
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS tasks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        title TEXT NOT NULL,
+                        priority TEXT NOT NULL DEFAULT 'normal',
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        created_at TEXT NOT NULL,
+                        completed_at TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority)
                     """
                 )
                 # On startup/restart, safely mark any interrupted workflows
@@ -1171,5 +1194,149 @@ class ConversationMemory:
                     """,
                     (reminder_id, user_id),
                 )
+                conn.commit()
+                return cur.rowcount > 0
+
+    # =========================================================================
+    # Task Management System (Step 19)
+    # =========================================================================
+
+    def add_task(self, title: str, priority: str = "normal") -> dict[str, Any]:
+        """Insert a new task into the database."""
+        clean_title = title.strip()
+        if not clean_title:
+            raise ValueError("Task title cannot be empty.")
+
+        prio = priority.strip().lower()
+        if prio == "medium":
+            prio = "normal"
+        if prio not in {"low", "normal", "high"}:
+            prio = "normal"
+
+        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        with self._lock:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO tasks (title, priority, status, created_at, completed_at)
+                    VALUES (?, ?, 'pending', ?, NULL)
+                    """,
+                    (clean_title, prio, now_utc),
+                )
+                conn.commit()
+                task_id = int(cur.lastrowid)
+
+        return {
+            "id": task_id,
+            "title": clean_title,
+            "priority": prio,
+            "status": "pending",
+            "created_at": now_utc,
+            "completed_at": None,
+        }
+
+    def list_tasks(self, include_completed: bool = False) -> list[dict[str, Any]]:
+        """Retrieve tasks ordered by status (pending first), priority, and creation order."""
+        with self._lock:
+            with self._get_connection() as conn:
+                if include_completed:
+                    query = """
+                        SELECT id, title, priority, status, created_at, completed_at
+                        FROM tasks
+                        ORDER BY
+                            CASE status WHEN 'pending' THEN 1 ELSE 2 END ASC,
+                            CASE priority WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 ELSE 4 END ASC,
+                            id ASC
+                    """
+                    cur = conn.execute(query)
+                else:
+                    query = """
+                        SELECT id, title, priority, status, created_at, completed_at
+                        FROM tasks
+                        WHERE status = 'pending'
+                        ORDER BY
+                            CASE priority WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 ELSE 4 END ASC,
+                            id ASC
+                    """
+                    cur = conn.execute(query)
+
+                rows = cur.fetchall()
+
+        return [
+            {
+                "id": row[0],
+                "title": row[1],
+                "priority": row[2],
+                "status": row[3],
+                "created_at": row[4],
+                "completed_at": row[5],
+            }
+            for row in rows
+        ]
+
+    def get_task(self, task_id: int) -> dict[str, Any] | None:
+        """Fetch a specific task by its ID."""
+        with self._lock:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    "SELECT id, title, priority, status, created_at, completed_at FROM tasks WHERE id = ?",
+                    (task_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "title": row[1],
+                    "priority": row[2],
+                    "status": row[3],
+                    "created_at": row[4],
+                    "completed_at": row[5],
+                }
+
+    def complete_task(self, task_id: int) -> dict[str, Any] | None:
+        """Mark a task as completed."""
+        with self._lock:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    "SELECT id, title, priority, status, created_at, completed_at FROM tasks WHERE id = ?",
+                    (task_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+
+                if row[3] == "completed":
+                    return {
+                        "id": row[0],
+                        "title": row[1],
+                        "priority": row[2],
+                        "status": "completed",
+                        "created_at": row[4],
+                        "completed_at": row[5],
+                    }
+
+                now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                conn.execute(
+                    "UPDATE tasks SET status = 'completed', completed_at = ? WHERE id = ?",
+                    (now_utc, task_id),
+                )
+                conn.commit()
+
+                return {
+                    "id": row[0],
+                    "title": row[1],
+                    "priority": row[2],
+                    "status": "completed",
+                    "created_at": row[4],
+                    "completed_at": now_utc,
+                }
+
+    def delete_task(self, task_id: int) -> bool:
+        """Delete a task by its ID."""
+        with self._lock:
+            with self._get_connection() as conn:
+                cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
                 conn.commit()
                 return cur.rowcount > 0

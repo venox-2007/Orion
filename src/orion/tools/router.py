@@ -854,6 +854,140 @@ def check_deterministic_system_query(
     return {"handled": True, "reply": reply}
 
 
+def check_deterministic_task_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check and execute task management queries (Step 19)."""
+    clean = clean_text.strip()
+    clean_lower = clean.lower()
+    clean_no_punct = re.sub(r"[^\w\s]", "", clean_lower).strip()
+
+    # 'remind me to' must NOT be captured here; let reminder router handle reminders
+    if clean_no_punct.startswith("remind") or re.search(r"\bremind\s+me\b", clean_no_punct):
+        return None
+
+    from orion.core import tasks
+
+    mem = context.get("memory") if context else None
+
+    # B. LIST / VIEW TASKS
+    list_match = re.match(
+        r"(?i)^(?:show|list|view|what\s+are|get)\s+(?:my\s+)?(?:all\s+)?(?:tasks|todos|to-?do\s+list)(?:\s+all)?\??$",
+        clean,
+    ) or re.match(
+        r"^(?:show|list|view|what are|get)\s+(?:my\s+)?(?:all\s+)?(?:tasks|todos|todo list|to do list)(?:\s+all)?$",
+        clean_no_punct,
+    ) or clean_no_punct in ("tasks", "todos", "all tasks", "show tasks", "my tasks", "list tasks")
+
+    if list_match:
+        all_flag = bool(re.search(r"\ball\b", clean_no_punct))
+        task_list = tasks.list_tasks(include_completed=all_flag, memory=mem)
+        reply = tasks.format_task_list(task_list, show_completed=all_flag)
+        return {"handled": True, "reply": reply}
+
+    # C. COMPLETE TASK
+    complete_match = re.match(
+        r"(?i)^(?:complete|finish|done|mark)\s+(?:task|todo)\s+(\d+)(?:\s+as\s+done)?[\.!]?$",
+        clean,
+    ) or re.match(
+        r"(?i)^mark\s+(?:task\s+)?(\d+)\s+(?:as\s+)?(?:done|complete|completed)[\.!]?$",
+        clean,
+    ) or re.match(
+        r"^(?:complete|finish|done|mark)\s+(?:task|todo)\s+(\d+)(?:\s+as\s+done)?$",
+        clean_no_punct,
+    ) or re.match(
+        r"^mark\s+(?:task\s+)?(\d+)\s+(?:as\s+)?(?:done|complete|completed)$",
+        clean_no_punct,
+    )
+
+    if complete_match:
+        task_id = int(complete_match.group(1))
+        updated = tasks.complete_task(task_id, memory=mem)
+        if updated:
+            return {
+                "handled": True,
+                "reply": f"🎉 Marked task #{task_id} (<b>{updated['title']}</b>) as completed!",
+            }
+        return {
+            "handled": True,
+            "reply": f"Task #{task_id} was not found.",
+        }
+
+    # D. DELETE / REMOVE TASK
+    delete_match = re.match(
+        r"(?i)^(?:delete|remove|cancel)\s+(?:task|todo)\s+(\d+)[\.!]?$",
+        clean,
+    ) or re.match(
+        r"^(?:delete|remove|cancel)\s+(?:task|todo)\s+(\d+)$",
+        clean_no_punct,
+    )
+
+    if delete_match:
+        task_id = int(delete_match.group(1))
+        deleted = tasks.delete_task(task_id, memory=mem)
+        if deleted:
+            return {
+                "handled": True,
+                "reply": f"🗑️ Deleted task #{task_id}.",
+            }
+        return {
+            "handled": True,
+            "reply": f"Task #{task_id} was not found.",
+        }
+
+    # A. ADD TASK
+    add_match = re.match(
+        r"(?i)^(?:add|create|new)\s+(?:a\s+)?(?:task|todo)(?:\s+(high|medium|low|normal)\s+priority)?\s*[:\-]?\s*(.+)$",
+        clean,
+    )
+
+    if not add_match:
+        add_match = re.match(
+            r"(?i)^(?:add|create|new)\s+(?:a\s+)?(?:task|todo)\s+to\s+(.+)$",
+            clean,
+        )
+
+    if add_match:
+        prio_group = add_match.group(1) if add_match.lastindex and add_match.lastindex >= 2 else None
+        raw_title = add_match.group(add_match.lastindex).strip() if add_match.lastindex else ""
+
+        if raw_title.lower().startswith("to "):
+            raw_title = raw_title[3:].strip()
+
+        prio_prefix = re.match(r"(?i)^(high|medium|low|normal)\s+priority\s*[:\-]?\s*(.+)$", raw_title)
+        if prio_prefix:
+            prio_group = prio_prefix.group(1)
+            raw_title = prio_prefix.group(2).strip()
+
+        prio_suffix = re.search(r"(?i)\s+(?:with\s+)?(high|medium|low|normal)\s+priority$", raw_title)
+        if prio_suffix:
+            prio_group = prio_suffix.group(1)
+            raw_title = raw_title[:prio_suffix.start()].strip()
+
+        raw_title = re.sub(r"^[\s:\-]+", "", raw_title).strip()
+        if not raw_title:
+            return None
+
+        priority = (prio_group or "normal").lower()
+        if priority == "medium":
+            priority = "normal"
+
+        try:
+            task = tasks.add_task(title=raw_title, priority=priority, memory=mem)
+            return {
+                "handled": True,
+                "reply": f"✅ Added task: <b>{task['title']}</b> (Priority: {task['priority']}, ID: {task['id']})",
+            }
+        except ValueError as err:
+            return {
+                "handled": True,
+                "reply": f"Could not add task: {err}",
+            }
+
+    return None
+
+
 SPLIT_CLAUSE_REGEX = re.compile(
     r",\s*(?:and\s+)?then\s+"
     r"|\s+(?:and\s+)?then\s+"
@@ -1524,6 +1658,11 @@ async def route_and_execute_tool(
     sys_res = check_deterministic_system_query(clean_text, context=context)
     if sys_res:
         return sys_res
+
+    # 6. Deterministic task management queries (Step 19)
+    task_res = check_deterministic_task_query(clean_text, context=context)
+    if task_res:
+        return task_res
 
     # Fast check: bypass LLM tool router for conceptual questions and basic chat greetings
     if should_bypass_llm_tool_router(clean_text):
