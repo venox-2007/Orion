@@ -1222,8 +1222,10 @@ def check_deterministic_file_fetch_query(
     clean = clean_text.strip().rstrip(".?! ")
     clean_lower = clean.lower()
 
-    # Avoid capturing queries that are tasks, reminders, or workstation actions
+    # Avoid capturing queries that are tasks, reminders, workstation actions, or clipboard
     if clean_lower.startswith(("add ", "create ", "remind ", "task ", "delete ", "remove ", "lock ", "volume ", "turn ", "play", "pause", "skip", "mute", "unmute")):
+        return None
+    if "clipboard" in clean_lower:
         return None
 
     # 1. Latest file pattern
@@ -1271,7 +1273,7 @@ def check_deterministic_file_fetch_query(
         dir_alias = m_specific.group(2)
 
         # Disallow non-file terms
-        if filename.lower() in ("screenshot", "screen capture", "desktop", "it", "that"):
+        if filename.lower() in ("screenshot", "screen capture", "desktop", "it", "that", "clipboard"):
             return None
 
         try:
@@ -1478,11 +1480,37 @@ def check_deterministic_watchdog_query(
     return None
 
 
+def _clean_type_payload(raw: str) -> str:
+    """Extract clean text to type by stripping enclosing quotes and trailing window targets."""
+    raw = raw.strip()
+    # 1. Quoted string with optional trailing window clause, e.g. 'type "hello" in notepad'
+    m_quoted = re.match(r'^(["\'])(.*?)\1(?:\s+in\s+.+)?$', raw, re.IGNORECASE | re.DOTALL)
+    if m_quoted:
+        return m_quoted.group(2)
+
+    # 2. Unquoted string followed by 'in <window>'
+    m_window = re.match(
+        r"^(.+?)\s+in\s+(?:the\s+)?(?:active\s+window|foreground\s+window|window|[a-zA-Z0-9_\-\.]+(?:\.exe)?)$",
+        raw,
+        re.IGNORECASE,
+    )
+    if m_window:
+        cleaned = m_window.group(1).strip()
+    else:
+        cleaned = raw
+
+    # 3. Strip any outer quotes if present
+    if (cleaned.startswith('"') and cleaned.endswith('"')) or (cleaned.startswith("'") and cleaned.endswith("'")):
+        if len(cleaned) >= 2:
+            cleaned = cleaned[1:-1]
+    return cleaned
+
+
 def check_deterministic_input_query(
     clean_text: str,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Deterministically check for remote clipboard inspection/setting and virtual typing/keystrokes (Step 25)."""
+    """Deterministically check for remote clipboard inspection/setting and virtual typing/keystrokes (Step 25 / 25.1)."""
     clean = clean_text.strip()
     clean_lower = clean.lower().rstrip(".?! ")
     clean_no_punct = re.sub(r"[^\w\s]", "", clean_lower).strip()
@@ -1490,7 +1518,7 @@ def check_deterministic_input_query(
     from orion.tools import input_control
 
     # A. Get Clipboard
-    get_clip_pat = r"^(?:what(?:'s|\s+is)\s+in\s+(?:my\s+)?clipboard|get\s+clipboard|read\s+clipboard|show\s+clipboard)$"
+    get_clip_pat = r"^(?:what(?:'s|s|\s+is)\s+(?:on|in)\s+(?:my\s+)?clipboard|get\s+clipboard|read\s+clipboard|show\s+clipboard|check\s+clipboard|clipboard)$"
     if re.match(get_clip_pat, clean_lower) or re.match(get_clip_pat, clean_no_punct):
         clip_text = input_control.get_clipboard_text()
         if not clip_text:
@@ -1513,24 +1541,27 @@ def check_deterministic_input_query(
             input_control.set_clipboard_text(target_text)
             return {"handled": True, "reply": "📋 Copied to laptop clipboard."}
 
-    # C. Type Text (Remote Typing)
-    # 1. "type in: <text>", "type this: <text>", "type: <text>"
-    type_m1 = re.match(r"^(?:type\s+(?:this\s+)?in|type\s+this|type):\s*(.+)$", clean, re.IGNORECASE)
-    # 2. "type <text>", "inject text <text>"
-    type_m2 = re.match(r"^(?:type|inject\s+text)\s+(.+)$", clean, re.IGNORECASE)
-    type_match = type_m1 or type_m2
-    if type_match:
-        target_string = type_match.group(1).strip()
-        if not target_string.lower().startswith("of "):
-            input_control.type_text(target_string)
-            return {"handled": True, "reply": "⌨️ Typed text into active window."}
-
-    # D. Special Keys
-    key_match = re.match(r"^(?:press|hit)\s+(enter|escape|esc|tab|space|backspace)$", clean_lower)
+    # C. Special Keys & Single Key Press (e.g. "press enter", "press d")
+    key_match = re.match(r"^(?:press|hit)\s+(enter|escape|esc|tab|space|backspace|[a-zA-Z0-9])$", clean_lower)
     if key_match:
         key_name = key_match.group(1).strip()
         input_control.press_special_key(key_name)
         return {"handled": True, "reply": f"🔘 Pressed *{key_name.upper()}*."}
+
+    # D. Type Text (Remote Typing)
+    # 1. "type in: <text>", "type this: <text>", "type: <text>"
+    type_m1 = re.match(r"^(?:type\s+(?:this\s+)?in|type\s+this|type):\s*(.+)$", clean, re.IGNORECASE)
+    # 2. "type <text>", "inject text <text>"
+    type_m2 = re.match(r"^(?:type|inject\s+text)\s+(.+)$", clean, re.IGNORECASE)
+    # 3. "type key <char>"
+    type_m3 = re.match(r"^type\s+key\s+([a-zA-Z0-9])$", clean, re.IGNORECASE)
+    type_match = type_m1 or type_m2 or type_m3
+    if type_match:
+        raw_payload = type_match.group(1).strip()
+        target_string = _clean_type_payload(raw_payload)
+        if not target_string.lower().startswith("of "):
+            input_control.type_text(target_string)
+            return {"handled": True, "reply": "⌨️ Typed text into active window."}
 
     return None
 
@@ -2238,25 +2269,25 @@ async def route_and_execute_tool(
     if workstation_res:
         return workstation_res
 
-    # 9. Deterministic remote file fetch query (Step 22)
+    # 9. Deterministic remote clipboard & virtual input (Step 25 / 25.1)
+    input_res = check_deterministic_input_query(clean_text, context=context)
+    if input_res:
+        return input_res
+
+    # 10. Deterministic remote file fetch query (Step 22)
     file_fetch_res = check_deterministic_file_fetch_query(clean_text, context=context)
     if file_fetch_res:
         return file_fetch_res
 
-    # 10. Deterministic process management, power states & web navigation (Step 23)
+    # 11. Deterministic process management, power states & web navigation (Step 23)
     proc_power_res = check_deterministic_process_and_power_query(clean_text, context=context)
     if proc_power_res:
         return proc_power_res
 
-    # 11. Deterministic autonomous watchdog queries (Step 24)
+    # 12. Deterministic autonomous watchdog queries (Step 24)
     watchdog_res = check_deterministic_watchdog_query(clean_text, context=context)
     if watchdog_res:
         return watchdog_res
-
-    # 12. Deterministic remote clipboard & virtual input (Step 25)
-    input_res = check_deterministic_input_query(clean_text, context=context)
-    if input_res:
-        return input_res
 
     # Fast check: bypass LLM tool router for conceptual questions and basic chat greetings
     if should_bypass_llm_tool_router(clean_text):

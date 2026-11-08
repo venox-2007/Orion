@@ -215,9 +215,11 @@ def type_text(text: str) -> bool:
 
 
 def press_special_key(key_name: str) -> bool:
-    """Press and release a navigation key in the active window."""
+    """Press and release a navigation or alphanumeric key in the active window."""
     clean_key = key_name.strip().lower()
     vk = SPECIAL_KEYS.get(clean_key)
+    if vk is None and len(clean_key) == 1 and clean_key.isalnum():
+        vk = ord(clean_key.upper())
     if vk is None:
         return False
 

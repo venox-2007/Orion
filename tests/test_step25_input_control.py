@@ -100,7 +100,15 @@ def test_press_special_keys_mocked():
             call(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0),
         ]
 
-        # 5. Unsupported key returns False
+        # 5. Single alphanumeric key (e.g. "d")
+        mock_keybd.reset_mock()
+        assert press_special_key("d") is True
+        assert mock_keybd.call_args_list == [
+            call(0x44, 0, 0, 0),
+            call(0x44, 0, KEYEVENTF_KEYUP, 0),
+        ]
+
+        # 6. Unsupported key returns False
         mock_keybd.reset_mock()
         assert press_special_key("f13") is False
         mock_keybd.assert_not_called()
@@ -117,6 +125,31 @@ async def test_router_input_queries():
         assert "📋 *Clipboard Content:*" in res.get("reply", "")
         assert "Sample copied snippet" in res.get("reply", "")
         assert re.search(r"</?(?:b|i|s|code|pre)>", res["reply"]) is None
+
+        # Precedence test: "get clipboard" routes to input control, not file fetch
+        res_get = await route_and_execute_tool("get clipboard")
+        assert res_get is not None
+        assert res_get.get("handled") is True
+        assert "📋 *Clipboard Content:*" in res_get.get("reply", "")
+        assert res_get.get("type") != "document"
+
+        # Missing apostrophe test: "whats in my clipboard"
+        res_whats = await route_and_execute_tool("whats in my clipboard")
+        assert res_whats is not None
+        assert res_whats.get("handled") is True
+        assert "📋 *Clipboard Content:*" in res_whats.get("reply", "")
+
+        # Standalone "clipboard"
+        res_clip = await route_and_execute_tool("clipboard")
+        assert res_clip is not None
+        assert res_clip.get("handled") is True
+        assert "📋 *Clipboard Content:*" in res_clip.get("reply", "")
+
+        # "check clipboard"
+        res_check = await route_and_execute_tool("check clipboard")
+        assert res_check is not None
+        assert res_check.get("handled") is True
+        assert "📋 *Clipboard Content:*" in res_check.get("reply", "")
 
     # Get empty clipboard
     with patch("orion.tools.input_control.get_clipboard_text", return_value=""):
@@ -165,6 +198,18 @@ async def test_router_input_queries():
         assert res_type3 is not None and res_type3.get("handled") is True
         mock_type.assert_called_once_with("sudo apt update")
 
+        # Single character typing: "type d"
+        mock_type.reset_mock()
+        res_type_d = await route_and_execute_tool("type d")
+        assert res_type_d is not None and res_type_d.get("handled") is True
+        mock_type.assert_called_once_with("d")
+
+        # Quoted string with window suffix: 'type "hello" in notepad'
+        mock_type.reset_mock()
+        res_type_quote = await route_and_execute_tool('type "hello" in notepad')
+        assert res_type_quote is not None and res_type_quote.get("handled") is True
+        mock_type.assert_called_once_with("hello")
+
     # 4. Press special key ("press enter")
     with patch("orion.tools.input_control.press_special_key", return_value=True) as mock_press:
         res_key = await route_and_execute_tool("press enter")
@@ -179,3 +224,10 @@ async def test_router_input_queries():
         assert res_esc is not None and res_esc.get("handled") is True
         assert "🔘 Pressed *ESC*." in res_esc.get("reply", "")
         mock_press.assert_called_once_with("esc")
+
+        # Press single alphanumeric key: "press d"
+        mock_press.reset_mock()
+        res_press_d = await route_and_execute_tool("press d")
+        assert res_press_d is not None and res_press_d.get("handled") is True
+        assert "🔘 Pressed *D*." in res_press_d.get("reply", "")
+        mock_press.assert_called_once_with("d")
