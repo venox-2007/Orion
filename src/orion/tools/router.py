@@ -1478,6 +1478,63 @@ def check_deterministic_watchdog_query(
     return None
 
 
+def check_deterministic_input_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check for remote clipboard inspection/setting and virtual typing/keystrokes (Step 25)."""
+    clean = clean_text.strip()
+    clean_lower = clean.lower().rstrip(".?! ")
+    clean_no_punct = re.sub(r"[^\w\s]", "", clean_lower).strip()
+
+    from orion.tools import input_control
+
+    # A. Get Clipboard
+    get_clip_pat = r"^(?:what(?:'s|\s+is)\s+in\s+(?:my\s+)?clipboard|get\s+clipboard|read\s+clipboard|show\s+clipboard)$"
+    if re.match(get_clip_pat, clean_lower) or re.match(get_clip_pat, clean_no_punct):
+        clip_text = input_control.get_clipboard_text()
+        if not clip_text:
+            return {"handled": True, "reply": "📋 *Clipboard is currently empty.*"}
+        return {"handled": True, "reply": f"📋 *Clipboard Content:*\n```\n{clip_text}\n```"}
+
+    # B. Set Clipboard
+    # 1. "copy to clipboard: <text>", "copy this: <text>", "copy: <text>"
+    set_clip_m1 = re.match(r"^(?:copy\s+(?:this\s+)?to\s+clipboard|copy\s+this|copy):\s*(.+)$", clean, re.IGNORECASE)
+    # 2. "set clipboard to <text>", "copy <text>"
+    set_clip_m2 = re.match(r"^(?:set\s+clipboard\s+to|copy)\s+(.+)$", clean, re.IGNORECASE)
+    set_clip_match = set_clip_m1 or set_clip_m2
+    if set_clip_match:
+        target_text = set_clip_match.group(1).strip()
+        # Exclude file operations like "copy file report.pdf to documents"
+        if not (
+            target_text.lower().startswith(("file ", "folder ", "directory "))
+            or re.search(r"\bto\s+(?:downloads|documents|desktop)\b", target_text.lower())
+        ):
+            input_control.set_clipboard_text(target_text)
+            return {"handled": True, "reply": "📋 Copied to laptop clipboard."}
+
+    # C. Type Text (Remote Typing)
+    # 1. "type in: <text>", "type this: <text>", "type: <text>"
+    type_m1 = re.match(r"^(?:type\s+(?:this\s+)?in|type\s+this|type):\s*(.+)$", clean, re.IGNORECASE)
+    # 2. "type <text>", "inject text <text>"
+    type_m2 = re.match(r"^(?:type|inject\s+text)\s+(.+)$", clean, re.IGNORECASE)
+    type_match = type_m1 or type_m2
+    if type_match:
+        target_string = type_match.group(1).strip()
+        if not target_string.lower().startswith("of "):
+            input_control.type_text(target_string)
+            return {"handled": True, "reply": "⌨️ Typed text into active window."}
+
+    # D. Special Keys
+    key_match = re.match(r"^(?:press|hit)\s+(enter|escape|esc|tab|space|backspace)$", clean_lower)
+    if key_match:
+        key_name = key_match.group(1).strip()
+        input_control.press_special_key(key_name)
+        return {"handled": True, "reply": f"🔘 Pressed *{key_name.upper()}*."}
+
+    return None
+
+
 SPLIT_CLAUSE_REGEX = re.compile(
     r",\s*(?:and\s+)?then\s+"
     r"|\s+(?:and\s+)?then\s+"
@@ -2195,6 +2252,11 @@ async def route_and_execute_tool(
     watchdog_res = check_deterministic_watchdog_query(clean_text, context=context)
     if watchdog_res:
         return watchdog_res
+
+    # 12. Deterministic remote clipboard & virtual input (Step 25)
+    input_res = check_deterministic_input_query(clean_text, context=context)
+    if input_res:
+        return input_res
 
     # Fast check: bypass LLM tool router for conceptual questions and basic chat greetings
     if should_bypass_llm_tool_router(clean_text):
