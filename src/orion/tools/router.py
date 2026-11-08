@@ -1563,6 +1563,7 @@ def check_deterministic_input_query(
         target_app = m_compound.group(3).strip() if m_compound.group(3) else None
 
         clean_payload = _clean_type_payload(raw_payload)
+        effective_app = target_app or input_control.get_last_target_app()
 
         if target_app:
             if not input_control.focus_window_by_name(target_app):
@@ -1570,16 +1571,25 @@ def check_deterministic_input_query(
                     "handled": True,
                     "reply": f"⚠️ Could not find an active window for *{target_app}*. Please open it first.",
                 }
+        elif effective_app:
+            input_control.focus_window_by_name(effective_app)
 
         input_control.type_text(clean_payload)
         input_control.press_special_key(special_key)
+        if effective_app:
+            return {"handled": True, "reply": f"⌨️ Typed *{clean_payload}* and pressed *{special_key.upper()}* in *{effective_app}*."}
         return {"handled": True, "reply": f"⌨️ Typed *{clean_payload}* and pressed *{special_key.upper()}*."}
 
     # D. Special Keys & Single Key Press (e.g. "press enter", "press d")
     key_match = re.match(r"^(?:press|hit)\s+(enter|escape|esc|tab|space|backspace|[a-zA-Z0-9])$", clean_lower)
     if key_match:
         key_name = key_match.group(1).strip()
+        effective_app = input_control.get_last_target_app()
+        if effective_app:
+            input_control.focus_window_by_name(effective_app)
         input_control.press_special_key(key_name)
+        if effective_app:
+            return {"handled": True, "reply": f"🔘 Pressed *{key_name.upper()}* in *{effective_app}*."}
         return {"handled": True, "reply": f"🔘 Pressed *{key_name.upper()}*."}
 
     # E. Type Text (Remote Typing with target window support)
@@ -1599,6 +1609,7 @@ def check_deterministic_input_query(
         raw_payload = type_m1.group(2).strip()
         clean_payload, inferred_target = _parse_typing_target_and_payload(raw_payload)
         target_app = target_app or inferred_target
+        effective_app = target_app or input_control.get_last_target_app()
         if not clean_payload.lower().startswith("of "):
             if target_app:
                 if not input_control.focus_window_by_name(target_app):
@@ -1608,6 +1619,10 @@ def check_deterministic_input_query(
                     }
                 input_control.type_text(clean_payload)
                 return {"handled": True, "reply": f"⌨️ Typed text into *{target_app}*."}
+            elif effective_app:
+                input_control.focus_window_by_name(effective_app)
+                input_control.type_text(clean_payload)
+                return {"handled": True, "reply": f"⌨️ Typed text into *{effective_app}*."}
             else:
                 input_control.type_text(clean_payload)
                 return {"handled": True, "reply": "⌨️ Typed text into active window."}
@@ -1616,6 +1631,7 @@ def check_deterministic_input_query(
         m = type_m2 or type_m3
         raw_payload = m.group(1).strip()
         clean_payload, target_app = _parse_typing_target_and_payload(raw_payload)
+        effective_app = target_app or input_control.get_last_target_app()
         if not clean_payload.lower().startswith("of "):
             if target_app:
                 if not input_control.focus_window_by_name(target_app):
@@ -1625,6 +1641,10 @@ def check_deterministic_input_query(
                     }
                 input_control.type_text(clean_payload)
                 return {"handled": True, "reply": f"⌨️ Typed text into *{target_app}*."}
+            elif effective_app:
+                input_control.focus_window_by_name(effective_app)
+                input_control.type_text(clean_payload)
+                return {"handled": True, "reply": f"⌨️ Typed text into *{effective_app}*."}
             else:
                 input_control.type_text(clean_payload)
                 return {"handled": True, "reply": "⌨️ Typed text into active window."}

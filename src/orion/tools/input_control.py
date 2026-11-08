@@ -9,6 +9,20 @@ from typing import Any
 
 logger = logging.getLogger("orion.tools.input_control")
 
+# Persistent active target window context across remote input commands
+_last_target_app: str | None = None
+
+
+def get_last_target_app() -> str | None:
+    """Return the name of the last focused target application, or None."""
+    return _last_target_app
+
+
+def set_last_target_app(app_name: str | None) -> None:
+    """Set or clear the last focused target application."""
+    global _last_target_app
+    _last_target_app = app_name
+
 # Virtual key codes for common navigation keys
 VK_RETURN = 0x0D
 VK_ESCAPE = 0x1B
@@ -173,13 +187,21 @@ def set_clipboard_text(text: str) -> bool:
         return False
 
 
-def type_text(text: str) -> bool:
+def type_text(text: str, target_app: str | None = None) -> bool:
     """Inject text character-by-character into the active window using SendInput with KEYEVENTF_UNICODE."""
     if not text:
         return True
 
+    if target_app:
+        if not focus_window_by_name(target_app):
+            return False
+    elif _last_target_app:
+        focus_window_by_name(_last_target_app)
+
     try:
         user32, _ = _setup_ctypes_signatures()
+        import time
+
         for char in text:
             code = ord(char)
             inp_down = INPUT(
@@ -208,13 +230,14 @@ def type_text(text: str) -> bool:
             )
             inputs = (INPUT * 2)(inp_down, inp_up)
             user32.SendInput(2, inputs, ctypes.sizeof(INPUT))
+            time.sleep(0.01)
         return True
     except Exception as e:
         logger.warning("Failed to type text via SendInput: %s", e)
         return False
 
 
-def press_special_key(key_name: str) -> bool:
+def press_special_key(key_name: str, target_app: str | None = None) -> bool:
     """Press and release a navigation or alphanumeric key in the active window."""
     clean_key = key_name.strip().lower()
     vk = SPECIAL_KEYS.get(clean_key)
@@ -222,6 +245,12 @@ def press_special_key(key_name: str) -> bool:
         vk = ord(clean_key.upper())
     if vk is None:
         return False
+
+    if target_app:
+        if not focus_window_by_name(target_app):
+            return False
+    elif _last_target_app:
+        focus_window_by_name(_last_target_app)
 
     try:
         user32, _ = _setup_ctypes_signatures()
@@ -318,16 +347,18 @@ def focus_window_by_name(target_name: str) -> bool:
         # If minimized, restore it: ShowWindow(hwnd, 9) (SW_RESTORE)
         user32.ShowWindow(found_hwnd, 9)
 
-        # Tap dummy virtual key (VK_MENU / Alt = 0x12) if Windows restricts SetForegroundWindow
-        VK_MENU = 0x12
-        KEYEVENTF_KEYUP = 0x0002
-        try:
-            user32.keybd_event(VK_MENU, 0, 0, 0)
-            user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
-        except Exception:
-            pass
-
+        if hasattr(user32, "BringWindowToTop"):
+            try:
+                user32.BringWindowToTop(found_hwnd)
+            except Exception:
+                pass
+        if hasattr(user32, "SwitchToThisWindow"):
+            try:
+                user32.SwitchToThisWindow(found_hwnd, True)
+            except Exception:
+                pass
         user32.SetForegroundWindow(found_hwnd)
+        set_last_target_app(clean_target)
         import time
 
         time.sleep(0.15)

@@ -9,14 +9,23 @@ from orion.tools.input_control import (
     VK_RETURN,
     VK_TAB,
     get_clipboard_text,
+    get_last_target_app,
     press_special_key,
     set_clipboard_text,
+    set_last_target_app,
     type_text,
 )
 from orion.tools.router import (
     check_deterministic_input_query,
     route_and_execute_tool,
 )
+
+
+@pytest.fixture(autouse=True)
+def reset_last_target_app():
+    set_last_target_app(None)
+    yield
+    set_last_target_app(None)
 
 
 def test_clipboard_get_and_set_mocked():
@@ -258,7 +267,7 @@ async def test_compound_type_and_press_key():
             res2 = await route_and_execute_tool('type "login" and hit enter in chrome')
             assert res2 is not None
             assert res2.get("handled") is True
-            assert "⌨️ Typed *login* and pressed *ENTER*." in res2.get("reply", "")
+            assert "⌨️ Typed *login* and pressed *ENTER* in *chrome*." in res2.get("reply", "")
             mock_focus.assert_called_once_with("chrome")
             mock_type.assert_called_once_with("login")
             mock_press.assert_called_once_with("enter")
@@ -288,4 +297,41 @@ async def test_typing_with_window_focus():
             mock_focus_fail.assert_called_once_with("notepad")
             mock_type.assert_not_called()
             assert re.search(r"</?(?:b|i|s|code|pre)>", res_fail["reply"]) is None
+
+
+@pytest.mark.asyncio
+async def test_persistent_window_targeting():
+    """Verify subsequent input commands inherit the last focused target window."""
+    set_last_target_app("notepad")
+    assert get_last_target_app() == "notepad"
+
+    with patch("orion.tools.input_control.focus_window_by_name", return_value=True) as mock_focus, \
+         patch("orion.tools.input_control.type_text", return_value=True) as mock_type, \
+         patch("orion.tools.input_control.press_special_key", return_value=True) as mock_press:
+
+        # 1. Standard typing inherits last target window
+        res1 = await route_and_execute_tool('type "ghee khtm"')
+        assert res1 is not None and res1.get("handled") is True
+        assert "⌨️ Typed text into *notepad*." in res1.get("reply", "")
+        mock_focus.assert_called_once_with("notepad")
+        mock_type.assert_called_once_with("ghee khtm")
+
+        # 2. Compound typing inherits last target window
+        mock_focus.reset_mock()
+        mock_type.reset_mock()
+        res2 = await route_and_execute_tool("type d and press enter")
+        assert res2 is not None and res2.get("handled") is True
+        assert "⌨️ Typed *d* and pressed *ENTER* in *notepad*." in res2.get("reply", "")
+        mock_focus.assert_called_once_with("notepad")
+        mock_type.assert_called_once_with("d")
+        mock_press.assert_called_once_with("enter")
+
+        # 3. Special keypress inherits last target window
+        mock_focus.reset_mock()
+        mock_press.reset_mock()
+        res3 = await route_and_execute_tool("press enter")
+        assert res3 is not None and res3.get("handled") is True
+        assert "🔘 Pressed *ENTER* in *notepad*." in res3.get("reply", "")
+        mock_focus.assert_called_once_with("notepad")
+        mock_press.assert_called_once_with("enter")
 
