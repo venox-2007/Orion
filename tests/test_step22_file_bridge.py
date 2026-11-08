@@ -249,6 +249,8 @@ async def test_router_file_too_large_error(tmp_path):
         assert res.get("handled") is True
         assert "is too large to send via Telegram" in res["reply"]
         assert "52.0 MB" in res["reply"]
+        assert "*huge_archive.zip*" in res["reply"]
+        assert "<b>" not in res["reply"]
 
 
 def test_telegram_photo_handler_registered():

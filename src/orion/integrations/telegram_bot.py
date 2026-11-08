@@ -997,7 +997,7 @@ def create_telegram_app(
                                 file_size_mb = file_stat.st_size / (1024 * 1024)
                                 await send_formatted_message(
                                     reply_target,
-                                    f"⚠️ <b>{Path(file_path).name}</b> is too large to send via Telegram ({file_size_mb:.1f} MB, limit is 50 MB).",
+                                    f"⚠️ *{Path(file_path).name}* is too large to send via Telegram ({file_size_mb:.1f} MB, limit is 50 MB).",
                                 )
                                 conv_memory.add_message(owner_id, "user", user_text)
                                 conv_memory.add_message(

@@ -224,7 +224,7 @@ async def test_router_queries():
         res = await route_and_execute_tool("open github.com")
         assert res is not None
         assert res.get("handled") is True
-        assert "Opening <b>https://github.com</b>" in res.get("reply", "")
+        assert "Opening *https://github.com*" in res.get("reply", "")
         mock_wb.assert_called_once_with("https://github.com")
 
     # 7. Web search navigation
@@ -232,7 +232,7 @@ async def test_router_queries():
         res = await route_and_execute_tool("search for python tutorials")
         assert res is not None
         assert res.get("handled") is True
-        assert "Searching Google for: <i>python tutorials</i>" in res.get("reply", "")
+        assert "Searching Google for: _python tutorials_" in res.get("reply", "")
         mock_wb.assert_called_once_with("https://www.google.com/search?q=python+tutorials")
 
     # 8. Non-app exclusions (e.g. close window, stop music) should NOT be hijacked by process termination
@@ -241,3 +241,32 @@ async def test_router_queries():
 
     res_playback = check_deterministic_process_and_power_query("stop music")
     assert res_playback is None
+
+
+@pytest.mark.asyncio
+async def test_no_raw_html_in_router_responses(tmp_path):
+    """Regression test: verify router responses do not emit raw HTML tags."""
+    import re
+    from pathlib import Path
+    from orion.tools.router import route_and_execute_tool
+
+    dummy_file = tmp_path / "sample.pdf"
+    dummy_file.write_bytes(b"%PDF dummy")
+
+    with patch("webbrowser.open"), \
+         patch("orion.tools.file_bridge.get_latest_file", return_value=dummy_file), \
+         patch("orion.tools.file_bridge.is_path_allowed", return_value=True):
+        queries = [
+            "open github.com",
+            "search for test",
+            "show tasks",
+            "send me the latest file",
+        ]
+        for query in queries:
+            resp = await route_and_execute_tool(query)
+            assert resp is not None, f"Query '{query}' returned None"
+            assert resp.get("handled") is True
+            # For file fetch, reply may be in reply or caption
+            reply = resp.get("reply") or resp.get("caption") or ""
+            match = re.search(r"</?(?:b|i|s|code|pre)>", reply)
+            assert match is None, f"Found raw HTML tag {match.group(0)} in response for query '{query}': {resp}"

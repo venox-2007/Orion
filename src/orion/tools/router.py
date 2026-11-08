@@ -1246,7 +1246,7 @@ def check_deterministic_file_fetch_query(
             file_size_mb = st_size / (1024 * 1024)
             return {
                 "handled": True,
-                "reply": f"⚠️ <b>{file_path.name}</b> is too large to send via Telegram ({file_size_mb:.1f} MB, limit is 50 MB).",
+                "reply": f"⚠️ *{file_path.name}* is too large to send via Telegram ({file_size_mb:.1f} MB, limit is 50 MB).",
             }
 
         if context is not None and isinstance(context, dict):
@@ -1280,7 +1280,7 @@ def check_deterministic_file_fetch_query(
             mb = err.size_bytes / (1024 * 1024)
             return {
                 "handled": True,
-                "reply": f"⚠️ <b>{err.path.name}</b> is too large to send via Telegram ({mb:.1f} MB, limit is 50 MB).",
+                "reply": f"⚠️ *{err.path.name}* is too large to send via Telegram ({mb:.1f} MB, limit is 50 MB).",
             }
 
         if not file_path or not file_bridge.is_path_allowed(file_path):
@@ -1294,7 +1294,7 @@ def check_deterministic_file_fetch_query(
             file_size_mb = st_size / (1024 * 1024)
             return {
                 "handled": True,
-                "reply": f"⚠️ <b>{file_path.name}</b> is too large to send via Telegram ({file_size_mb:.1f} MB, limit is 50 MB).",
+                "reply": f"⚠️ *{file_path.name}* is too large to send via Telegram ({file_size_mb:.1f} MB, limit is 50 MB).",
             }
 
         if context is not None and isinstance(context, dict):
@@ -1356,7 +1356,7 @@ def check_deterministic_process_and_power_query(
         raw_url = url_match.group(1).strip()
         full_url = raw_url if raw_url.startswith(("http://", "https://")) else f"https://{raw_url}"
         workstation.open_browser_url(raw_url)
-        return {"handled": True, "reply": f"🌐 Opening <b>{full_url}</b> in default browser."}
+        return {"handled": True, "reply": f"🌐 Opening *{full_url}* in default browser."}
 
     # Web search
     search_match = re.match(r"^(?:search\s+(?:for\s+)?|google\s+)(.+)$", clean, re.IGNORECASE)
@@ -1375,7 +1375,7 @@ def check_deterministic_process_and_power_query(
             query_text = yt_match.group(1).strip()
 
         workstation.open_web_search(query_text, engine=engine)
-        return {"handled": True, "reply": f"🔍 Searching {display_engine} for: <i>{query_text}</i>"}
+        return {"handled": True, "reply": f"🔍 Searching {display_engine} for: _{query_text}_"}
 
     # 4. Top Processes / Resource Hogs
     proc_pat1 = r"^(?:what(?:'s|\s+is)\s+eating\s+(?:my\s+)?(?:ram|memory|cpu)|top\s+(?:cpu|ram|memory)\s+processes?|what\s+processes?\s+are\s+running)$"
