@@ -1799,6 +1799,23 @@ def check_deterministic_mouse_query(
         mouse_control.mouse_scroll(steps=steps, direction=direction)
         return {"handled": True, "reply": f"📜 Scrolled {direction} ({steps} steps)."}
 
+    # E. CLICK UI ELEMENT BY NAME (Step 29)
+    ui_click_pat = r"^(?:click|tap|press)\s+(?:on\s+)?(?:the\s+)?([a-zA-Z0-9_\- ]+?)(?:\s+button|\s+tab|\s+menu)?$"
+    m_ui = re.match(ui_click_pat, clean.rstrip(".?! "), re.IGNORECASE)
+    if m_ui:
+        element_name = m_ui.group(1).strip()
+        excluded = {"mouse", "cursor", "left", "right", "middle", "double"}
+        special_keys = {"enter", "return", "escape", "esc", "tab", "space", "backspace"}
+        if (
+            element_name.lower() not in excluded
+            and element_name.lower() not in special_keys
+            and not (len(element_name) == 1 and clean_lower.startswith("press "))
+        ):
+            from orion.tools import ui_locator
+
+            success, reply_msg = ui_locator.click_element_by_name(element_name)
+            return {"handled": True, "reply": reply_msg}
+
     return None
 
 
