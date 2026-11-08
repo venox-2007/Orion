@@ -1701,6 +1701,36 @@ def check_deterministic_memory_and_briefing_query(
     return None
 
 
+async def check_deterministic_shell_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check for remote shell/cmd execution commands (Step 27)."""
+    clean = clean_text.strip()
+
+    from orion.tools import shell_bridge
+
+    # A. PowerShell: "ps: <cmd>", "powershell: <cmd>"
+    m_ps = re.match(r"^(?:ps|powershell):\s*(.+)$", clean, re.IGNORECASE | re.DOTALL)
+    if m_ps:
+        cmd = m_ps.group(1).strip()
+        if cmd:
+            res = await shell_bridge.execute_shell_command(cmd, shell_type="powershell")
+            reply = shell_bridge.format_shell_output(res, cmd, shell_type="powershell")
+            return {"handled": True, "reply": reply}
+
+    # B. CMD: "cmd: <cmd>", "terminal: <cmd>", "run: <cmd>", "sh: <cmd>"
+    m_cmd = re.match(r"^(?:cmd|terminal|run|sh):\s*(.+)$", clean, re.IGNORECASE | re.DOTALL)
+    if m_cmd:
+        cmd = m_cmd.group(1).strip()
+        if cmd:
+            res = await shell_bridge.execute_shell_command(cmd, shell_type="cmd")
+            reply = shell_bridge.format_shell_output(res, cmd, shell_type="cmd")
+            return {"handled": True, "reply": reply}
+
+    return None
+
+
 SPLIT_CLAUSE_REGEX = re.compile(
     r",\s*(?:and\s+)?then\s+"
     r"|\s+(?:and\s+)?then\s+"
@@ -2428,6 +2458,11 @@ async def route_and_execute_tool(
     memory_briefing_res = check_deterministic_memory_and_briefing_query(clean_text, context=context)
     if memory_briefing_res:
         return memory_briefing_res
+
+    # 14. Deterministic remote shell & PowerShell command bridge (Step 27)
+    shell_res = await check_deterministic_shell_query(clean_text, context=context)
+    if shell_res:
+        return shell_res
 
     # Fast check: bypass LLM tool router for conceptual questions and basic chat greetings
     if should_bypass_llm_tool_router(clean_text):
