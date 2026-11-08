@@ -1731,6 +1731,77 @@ async def check_deterministic_shell_query(
     return None
 
 
+def check_deterministic_mouse_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check for remote mouse cursor and click queries (Step 28)."""
+    clean = clean_text.strip()
+    clean_lower = clean.lower().rstrip(".?! ")
+
+    from orion.tools import mouse_control
+
+    # A. CLICK & DOUBLE CLICK
+    # 1. Double Click
+    m_dbl = re.match(r"^(?:double\s+click)(?:\s+at\s+(\d+)[,\s]+(\d+))?$", clean_lower)
+    if m_dbl:
+        x_str, y_str = m_dbl.group(1), m_dbl.group(2)
+        if x_str and y_str:
+            x, y = int(x_str), int(y_str)
+            mouse_control.mouse_click(x, y, button="left", clicks=2)
+            return {"handled": True, "reply": f"🖱️ Double-clicked at ({x}, {y})."}
+        else:
+            mouse_control.mouse_click(button="left", clicks=2)
+            return {"handled": True, "reply": "🖱️ Double-clicked."}
+
+    # 2. Right Click
+    m_right = re.match(r"^(?:right\s+click)(?:\s+at\s+(\d+)[,\s]+(\d+))?$", clean_lower)
+    if m_right:
+        x_str, y_str = m_right.group(1), m_right.group(2)
+        if x_str and y_str:
+            x, y = int(x_str), int(y_str)
+            mouse_control.mouse_click(x, y, button="right", clicks=1)
+            return {"handled": True, "reply": f"🖱️ Right-clicked at ({x}, {y})."}
+        else:
+            mouse_control.mouse_click(button="right", clicks=1)
+            return {"handled": True, "reply": "🖱️ Right-clicked."}
+
+    # 3. Left Click / Click
+    m_click = re.match(r"^(?:click|left\s+click)(?:\s+at\s+(\d+)[,\s]+(\d+))?$", clean_lower)
+    if m_click:
+        x_str, y_str = m_click.group(1), m_click.group(2)
+        if x_str and y_str:
+            x, y = int(x_str), int(y_str)
+            mouse_control.mouse_click(x, y, button="left", clicks=1)
+            return {"handled": True, "reply": f"🖱️ Clicked at ({x}, {y})."}
+        else:
+            mouse_control.mouse_click(button="left", clicks=1)
+            return {"handled": True, "reply": "🖱️ Left clicked."}
+
+    # B. MOVE CURSOR
+    m_move = re.match(r"^(?:move\s+mouse\s+(?:to\s+)?|move\s+cursor\s+(?:to\s+)?)(\d+)[,\s]+(\d+)$", clean_lower)
+    if m_move:
+        x, y = int(m_move.group(1)), int(m_move.group(2))
+        mouse_control.move_cursor(x, y)
+        return {"handled": True, "reply": f"🖱️ Moved cursor to ({x}, {y})."}
+
+    # C. MOUSE POSITION
+    m_pos = re.match(r"^(?:where\s+is\s+my\s+mouse|get\s+mouse\s+pos(?:ition)?|cursor\s+pos(?:ition)?)$", clean_lower)
+    if m_pos:
+        x, y = mouse_control.get_cursor_position()
+        return {"handled": True, "reply": f"🖱️ *Cursor Position:* ({x}, {y})"}
+
+    # D. SCROLL
+    m_scroll = re.match(r"^(?:scroll\s+(up|down))(?:\s+(\d+))?$", clean_lower)
+    if m_scroll:
+        direction = m_scroll.group(1)
+        steps = int(m_scroll.group(2)) if m_scroll.group(2) else 3
+        mouse_control.mouse_scroll(steps=steps, direction=direction)
+        return {"handled": True, "reply": f"📜 Scrolled {direction} ({steps} steps)."}
+
+    return None
+
+
 SPLIT_CLAUSE_REGEX = re.compile(
     r",\s*(?:and\s+)?then\s+"
     r"|\s+(?:and\s+)?then\s+"
@@ -2463,6 +2534,11 @@ async def route_and_execute_tool(
     shell_res = await check_deterministic_shell_query(clean_text, context=context)
     if shell_res:
         return shell_res
+
+    # 15. Deterministic remote mouse & cursor control (Step 28)
+    mouse_res = check_deterministic_mouse_query(clean_text, context=context)
+    if mouse_res:
+        return mouse_res
 
     # Fast check: bypass LLM tool router for conceptual questions and basic chat greetings
     if should_bypass_llm_tool_router(clean_text):
