@@ -278,6 +278,7 @@ def create_telegram_app(
     tool_registry: ToolRegistry | None = None,
     transcriber: VoiceTranscriber | None = None,
     scheduler: Any | None = None,
+    watchdog: Any | None = None,
 ) -> Application:
     """Build and configure the Telegram application with handlers."""
     client = ollama_client or OllamaClient()
@@ -286,6 +287,15 @@ def create_telegram_app(
     settings = get_settings()
     user_lock = asyncio.Lock()
     user_last_actions: dict[int, dict[str, Any]] = {}
+
+    from orion.core.watchdog import WatchdogEngine, set_watchdog_engine
+
+    watchdog_engine = watchdog or WatchdogEngine(
+        bot_app=None,
+        owner_id=owner_id,
+        check_interval_sec=30,
+    )
+    set_watchdog_engine(watchdog_engine)
 
     # Initialize offline voice transcriber if enabled
     voice_transcriber = transcriber
@@ -961,6 +971,7 @@ def create_telegram_app(
                 "owner_id": owner_id,
                 "memory": conv_memory,
                 "last_action": user_last_actions.get(owner_id),
+                "watchdog": watchdog_engine,
             }
             try:
                 # 1. Attempt natural-language tool routing first
@@ -1686,11 +1697,26 @@ def create_telegram_app(
         sched = application.bot_data.get("reminder_scheduler")
         if sched:
             sched.start()
+        wd: WatchdogEngine | None = application.bot_data.get("watchdog")
+        if wd:
+            wd.bot_app = application
+            wd_task = asyncio.create_task(wd.run_loop())
+            application.bot_data["watchdog_task"] = wd_task
 
     async def _post_shutdown(application: Application) -> None:
         sched = application.bot_data.get("reminder_scheduler")
         if sched:
             await sched.stop()
+        wd: WatchdogEngine | None = application.bot_data.get("watchdog")
+        if wd:
+            await wd.stop()
+        wd_task: asyncio.Task | None = application.bot_data.get("watchdog_task")
+        if wd_task and not wd_task.done():
+            wd_task.cancel()
+            try:
+                await wd_task
+            except asyncio.CancelledError:
+                pass
 
     app = (
         ApplicationBuilder()
@@ -1700,6 +1726,7 @@ def create_telegram_app(
         .build()
     )
     app.bot_data["reminder_scheduler"] = reminder_scheduler
+    app.bot_data["watchdog"] = watchdog_engine
 
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("reset", reset_handler))

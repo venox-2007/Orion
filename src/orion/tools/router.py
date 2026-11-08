@@ -1415,6 +1415,7 @@ def check_deterministic_process_and_power_query(
             "screen",
             "display",
             "monitor",
+            "watchdog",
         }
         if clean_target in non_app_words or clean_target.startswith(("task ", "reminder ")):
             return None
@@ -1424,6 +1425,55 @@ def check_deterministic_process_and_power_query(
         is_force = clean_lower.startswith("kill")
         success, reply_msg = process_manager.terminate_application(target, force=is_force)
         return {"handled": True, "reply": reply_msg}
+
+    return None
+
+
+def check_deterministic_watchdog_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check for autonomous watchdog status and controls (Step 24)."""
+    clean = clean_text.strip().rstrip(".?! ")
+    clean_lower = clean.lower()
+    clean_no_punct = re.sub(r"[^\w\s]", "", clean_lower).strip()
+
+    from orion.core import watchdog as wd_module
+
+    engine = None
+    if context and "watchdog" in context:
+        engine = context["watchdog"]
+    else:
+        engine = wd_module.get_watchdog_engine()
+
+    # 1. Watchdog status
+    status_pat = r"^(?:watchdog\s+status|status\s+of\s+watchdog|is\s+watchdog\s+running)$"
+    if re.match(status_pat, clean_lower) or re.match(status_pat, clean_no_punct):
+        is_active = engine.state.enabled if engine else True
+        state_str = "Active" if is_active else "Paused"
+        interval = engine.check_interval_sec if engine else 30
+        mon_str = "Active" if is_active else "Paused"
+        reply = (
+            f"🛡️ *Watchdog Status:* {state_str}\n"
+            f"• Interval: {interval}s\n"
+            f"• Battery Monitoring: {mon_str}\n"
+            f"• Thermal Monitoring: {mon_str}"
+        )
+        return {"handled": True, "reply": reply}
+
+    # 2. Pause watchdog
+    pause_pat = r"^(?:pause\s+watchdog|disable\s+watchdog|stop\s+watchdog)$"
+    if re.match(pause_pat, clean_lower) or re.match(pause_pat, clean_no_punct):
+        if engine:
+            engine.pause()
+        return {"handled": True, "reply": "⏸️ *Autonomous Watchdog paused.*"}
+
+    # 3. Resume watchdog
+    resume_pat = r"^(?:resume\s+watchdog|enable\s+watchdog|start\s+watchdog)$"
+    if re.match(resume_pat, clean_lower) or re.match(resume_pat, clean_no_punct):
+        if engine:
+            engine.resume()
+        return {"handled": True, "reply": "▶️ *Autonomous Watchdog resumed.*"}
 
     return None
 
@@ -1798,6 +1848,10 @@ def check_deterministic_app_launch(
     ):
         return None
 
+    # Check if target is a watchdog control command (Step 24): let watchdog router handle it
+    if raw_target.lower() in ("watchdog", "autonomous watchdog"):
+        return None
+
     if raw_target.lower() in PRONOUN_APP_TARGETS:
         resolved_app, reason = resolve_target_app_from_context(raw_target, context)
         if resolved_app:
@@ -2136,6 +2190,11 @@ async def route_and_execute_tool(
     proc_power_res = check_deterministic_process_and_power_query(clean_text, context=context)
     if proc_power_res:
         return proc_power_res
+
+    # 11. Deterministic autonomous watchdog queries (Step 24)
+    watchdog_res = check_deterministic_watchdog_query(clean_text, context=context)
+    if watchdog_res:
+        return watchdog_res
 
     # Fast check: bypass LLM tool router for conceptual questions and basic chat greetings
     if should_bypass_llm_tool_router(clean_text):
