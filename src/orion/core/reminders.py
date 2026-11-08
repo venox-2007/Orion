@@ -627,3 +627,59 @@ class ReminderScheduler:
                 await asyncio.sleep(self.check_interval)
             except asyncio.CancelledError:
                 break
+
+
+class ReminderManager:
+    """Manager for querying and coordinating personal reminders."""
+
+    def __init__(
+        self,
+        db_path: str | None = None,
+        memory: ConversationMemory | None = None,
+    ) -> None:
+        self.db_path = str(db_path) if db_path is not None else None
+        self.memory = memory or (ConversationMemory(db_path=self.db_path) if self.db_path else ConversationMemory())
+
+    def get_upcoming_reminders(
+        self,
+        hours: float = 24.0,
+        user_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve active reminders scheduled within the next N hours."""
+        now_ts = time.time()
+        max_ts = now_ts + (hours * 3600)
+        with self.memory._lock:
+            with self.memory._get_connection() as conn:
+                if user_id is not None:
+                    cur = conn.execute(
+                        """
+                        SELECT id, user_id, message, scheduled_at, recurrence, timezone, status
+                        FROM reminders
+                        WHERE user_id = ? AND status = 'active' AND scheduled_at <= ?
+                        ORDER BY scheduled_at ASC
+                        """,
+                        (user_id, max_ts),
+                    )
+                else:
+                    cur = conn.execute(
+                        """
+                        SELECT id, user_id, message, scheduled_at, recurrence, timezone, status
+                        FROM reminders
+                        WHERE status = 'active' AND scheduled_at <= ?
+                        ORDER BY scheduled_at ASC
+                        """,
+                        (max_ts,),
+                    )
+                rows = cur.fetchall()
+                return [
+                    {
+                        "id": r[0],
+                        "user_id": r[1],
+                        "message": r[2],
+                        "scheduled_at": float(r[3]),
+                        "recurrence": r[4],
+                        "timezone": r[5],
+                        "status": r[6],
+                    }
+                    for r in rows
+                ]

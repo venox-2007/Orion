@@ -97,3 +97,35 @@ def format_task_list(
 
     lines.append("\n_Use 'complete task <id>' to mark a task as done._")
     return "\n".join(lines)
+
+
+class TaskManager:
+    """Manager for querying and coordinating personal tasks."""
+
+    def __init__(
+        self,
+        db_path: str | None = None,
+        memory: ConversationMemory | None = None,
+    ) -> None:
+        self.db_path = str(db_path) if db_path is not None else None
+        self.memory = memory
+
+    def get_pending_tasks(self) -> list[dict[str, Any]]:
+        """Retrieve all pending tasks."""
+        return list_tasks(include_completed=False, memory=self.memory, db_path=self.db_path)
+
+    def list_tasks(self, include_completed: bool = False) -> list[dict[str, Any]]:
+        """List tasks with optional completed tasks."""
+        return list_tasks(include_completed=include_completed, memory=self.memory, db_path=self.db_path)
+
+    def add_task(self, title: str, priority: str = "normal") -> dict[str, Any]:
+        """Add a new task."""
+        return add_task(title=title, priority=priority, memory=self.memory, db_path=self.db_path)
+
+    def complete_task(self, task_id: int) -> dict[str, Any] | None:
+        """Mark a task as completed."""
+        return complete_task(task_id=task_id, memory=self.memory, db_path=self.db_path)
+
+    def delete_task(self, task_id: int) -> bool:
+        """Delete a task."""
+        return delete_task(task_id=task_id, memory=self.memory, db_path=self.db_path)

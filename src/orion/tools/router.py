@@ -1652,6 +1652,55 @@ def check_deterministic_input_query(
     return None
 
 
+def check_deterministic_memory_and_briefing_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check for long-term memory operations and executive daily briefings (Step 26)."""
+    clean = clean_text.strip()
+    clean_lower = clean.lower().rstrip(".?! ")
+
+    from orion.core.briefing import generate_executive_briefing
+    from orion.core.memory_store import get_memory_store
+
+    db_path = context.get("db_path") if context else None
+    mem_store = get_memory_store(db_path=db_path)
+
+    # A. DAILY BRIEFING
+    briefing_pat = r"^(?:give\s+me\s+(?:my\s+)?(?:daily\s+|morning\s+)?briefing|daily\s+briefing|morning\s+briefing|briefing)$"
+    if re.match(briefing_pat, clean_lower):
+        briefing_md = generate_executive_briefing(db_path=db_path)
+        return {"handled": True, "reply": briefing_md}
+
+    # B. REMEMBER FACT
+    rem_pat = r"^(?:remember\s+(?:that\s+)?|store\s+memory:\s*)(.+)$"
+    m_rem = re.match(rem_pat, clean, re.IGNORECASE)
+    if m_rem:
+        fact_text = m_rem.group(1).strip()
+        if fact_text:
+            mem_store.save_fact(fact_text)
+            return {"handled": True, "reply": f"🧠 *Memory stored:*\n_{fact_text}_"}
+
+    # C. LIST MEMORIES
+    list_pat = r"^(?:what\s+do\s+you\s+remember(?:\s+about\s+me)?|show\s+memories|list\s+memories|my\s+memories)$"
+    if re.match(list_pat, clean_lower):
+        memories = mem_store.get_all_memories()
+        return {"handled": True, "reply": mem_store.format_memories_list(memories)}
+
+    # D. FORGET MEMORY
+    forget_pat = r"^(?:forget\s+memory|delete\s+memory)\s+([a-zA-Z0-9_\-]+)$"
+    m_forget = re.match(forget_pat, clean, re.IGNORECASE)
+    if m_forget:
+        identifier = m_forget.group(1).strip()
+        deleted = mem_store.delete_memory(identifier)
+        if deleted:
+            return {"handled": True, "reply": f"🗑️ *Memory forgotten:* `{identifier}`"}
+        else:
+            return {"handled": True, "reply": f"⚠️ Memory `{identifier}` not found."}
+
+    return None
+
+
 SPLIT_CLAUSE_REGEX = re.compile(
     r",\s*(?:and\s+)?then\s+"
     r"|\s+(?:and\s+)?then\s+"
@@ -2374,6 +2423,11 @@ async def route_and_execute_tool(
     watchdog_res = check_deterministic_watchdog_query(clean_text, context=context)
     if watchdog_res:
         return watchdog_res
+
+    # 13. Deterministic long-term memory & executive briefing queries (Step 26)
+    memory_briefing_res = check_deterministic_memory_and_briefing_query(clean_text, context=context)
+    if memory_briefing_res:
+        return memory_briefing_res
 
     # Fast check: bypass LLM tool router for conceptual questions and basic chat greetings
     if should_bypass_llm_tool_router(clean_text):

@@ -24,7 +24,11 @@ from orion.integrations.formatter import (
     markdown_to_telegram_html,
     split_html_message,
 )
-from orion.integrations.ollama import OLLAMA_UNAVAILABLE_MESSAGE, OllamaClient
+from orion.integrations.ollama import (
+    DEFAULT_SYSTEM_PROMPT,
+    OLLAMA_UNAVAILABLE_MESSAGE,
+    OllamaClient,
+)
 from orion.memory.database import ConversationMemory
 from orion.tools.app_launcher import get_approved_apps, is_app_available
 from orion.tools.registry import ToolRegistry, default_tool_registry
@@ -1136,7 +1140,19 @@ def create_telegram_app(
                         user_id=owner_id,
                         limit=settings.max_history_messages,
                     )
-                    reply_text = await client.generate_response(user_text, history=history)
+                    from orion.core.memory_store import get_memory_store
+
+                    mem_store = get_memory_store(db_path=conv_memory.db_path)
+                    memory_context = mem_store.get_prompt_injection_context()
+                    if memory_context:
+                        system_prompt = f"{DEFAULT_SYSTEM_PROMPT}\n\nKnown facts about user:\n{memory_context}"
+                        reply_text = await client.generate_response(
+                            user_text,
+                            history=history,
+                            system_prompt=system_prompt,
+                        )
+                    else:
+                        reply_text = await client.generate_response(user_text, history=history)
 
                     if reply_text != OLLAMA_UNAVAILABLE_MESSAGE:
                         conv_memory.add_message(owner_id, "user", user_text)
