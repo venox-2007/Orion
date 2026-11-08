@@ -231,3 +231,107 @@ def press_special_key(key_name: str) -> bool:
     except Exception as e:
         logger.warning("Failed to press special key %s: %s", key_name, e)
         return False
+
+
+def focus_window_by_name(target_name: str) -> bool:
+    """Find and bring to foreground an active visible window matching target_name."""
+    clean_target = target_name.strip().lower()
+    if not clean_target:
+        return False
+
+    name_mappings = {
+        "notepad": ["notepad"],
+        "chrome": ["chrome", "google chrome"],
+        "code": ["visual studio code", "vscode", "code"],
+        "vscode": ["visual studio code", "vscode", "code"],
+        "telegram": ["telegram"],
+        "word": ["word", "winword"],
+        "excel": ["excel"],
+        "powerpoint": ["powerpoint"],
+        "calc": ["calculator"],
+        "calculator": ["calculator"],
+        "edge": ["edge", "microsoft edge"],
+        "terminal": ["terminal", "powershell", "cmd"],
+        "spotify": ["spotify"],
+    }
+    match_keywords = name_mappings.get(clean_target, [clean_target])
+
+    try:
+        user32 = ctypes.windll.user32
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+        found_hwnd = None
+
+        def enum_cb(hwnd, lparam):
+            nonlocal found_hwnd
+            if hasattr(user32, "IsWindowVisible") and not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buff = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buff, length + 1)
+                title = buff.value.lower()
+                for kw in match_keywords:
+                    if kw in title:
+                        found_hwnd = hwnd
+                        return False
+            return True
+
+        cb_func = WNDENUMPROC(enum_cb)
+
+        # 1. Try EnumWindows first
+        user32.EnumWindows(cb_func, 0)
+
+        # 2. If not found, try desktop enumeration (for interactive Windows sessions)
+        if not found_hwnd and hasattr(user32, "OpenDesktopW"):
+            try:
+                DESKTOP_ENUMERATE = 0x0040
+                DESKTOP_READOBJECTS = 0x0001
+                h_desk = user32.OpenDesktopW("default", 0, False, DESKTOP_ENUMERATE | DESKTOP_READOBJECTS)
+                if h_desk:
+                    try:
+                        user32.EnumDesktopWindows(h_desk, cb_func, 0)
+                    finally:
+                        user32.CloseDesktop(h_desk)
+            except Exception:
+                pass
+
+        # 3. Fallback: check approved apps from desktop_inspector if available
+        if not found_hwnd:
+            try:
+                from orion.tools.desktop_inspector import _enumerate_windows_native
+
+                wins = _enumerate_windows_native()
+                for w in wins:
+                    for kw in match_keywords:
+                        if kw in w.app_id.lower() or kw in w.display_name.lower():
+                            found_hwnd = w.hwnd
+                            break
+                    if found_hwnd:
+                        break
+            except Exception:
+                pass
+
+        if not found_hwnd:
+            return False
+
+        # If minimized, restore it: ShowWindow(hwnd, 9) (SW_RESTORE)
+        user32.ShowWindow(found_hwnd, 9)
+
+        # Tap dummy virtual key (VK_MENU / Alt = 0x12) if Windows restricts SetForegroundWindow
+        VK_MENU = 0x12
+        KEYEVENTF_KEYUP = 0x0002
+        try:
+            user32.keybd_event(VK_MENU, 0, 0, 0)
+            user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+        except Exception:
+            pass
+
+        user32.SetForegroundWindow(found_hwnd)
+        import time
+
+        time.sleep(0.15)
+        return True
+    except Exception as e:
+        logger.warning("Failed to focus window for %s: %s", target_name, e)
+        return False

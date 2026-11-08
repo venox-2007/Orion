@@ -206,9 +206,12 @@ async def test_router_input_queries():
 
         # Quoted string with window suffix: 'type "hello" in notepad'
         mock_type.reset_mock()
-        res_type_quote = await route_and_execute_tool('type "hello" in notepad')
-        assert res_type_quote is not None and res_type_quote.get("handled") is True
-        mock_type.assert_called_once_with("hello")
+        with patch("orion.tools.input_control.focus_window_by_name", return_value=True) as mock_focus:
+            res_type_quote = await route_and_execute_tool('type "hello" in notepad')
+            assert res_type_quote is not None and res_type_quote.get("handled") is True
+            assert "Typed text into *notepad*" in res_type_quote.get("reply", "")
+            mock_focus.assert_called_once_with("notepad")
+            mock_type.assert_called_once_with("hello")
 
     # 4. Press special key ("press enter")
     with patch("orion.tools.input_control.press_special_key", return_value=True) as mock_press:
@@ -231,3 +234,58 @@ async def test_router_input_queries():
         assert res_press_d is not None and res_press_d.get("handled") is True
         assert "🔘 Pressed *D*." in res_press_d.get("reply", "")
         mock_press.assert_called_once_with("d")
+
+
+@pytest.mark.asyncio
+async def test_compound_type_and_press_key():
+    """Verify compound commands 'type <text> and press <key>' type text then press key."""
+    with patch("orion.tools.input_control.type_text", return_value=True) as mock_type, \
+         patch("orion.tools.input_control.press_special_key", return_value=True) as mock_press:
+
+        # 1. "type d and press enter"
+        res1 = await route_and_execute_tool("type d and press enter")
+        assert res1 is not None
+        assert res1.get("handled") is True
+        assert "⌨️ Typed *d* and pressed *ENTER*." in res1.get("reply", "")
+        mock_type.assert_called_once_with("d")
+        mock_press.assert_called_once_with("enter")
+        assert re.search(r"</?(?:b|i|s|code|pre)>", res1["reply"]) is None
+
+        # 2. Compound with window target: 'type "login" and hit enter in chrome'
+        mock_type.reset_mock()
+        mock_press.reset_mock()
+        with patch("orion.tools.input_control.focus_window_by_name", return_value=True) as mock_focus:
+            res2 = await route_and_execute_tool('type "login" and hit enter in chrome')
+            assert res2 is not None
+            assert res2.get("handled") is True
+            assert "⌨️ Typed *login* and pressed *ENTER*." in res2.get("reply", "")
+            mock_focus.assert_called_once_with("chrome")
+            mock_type.assert_called_once_with("login")
+            mock_press.assert_called_once_with("enter")
+
+
+@pytest.mark.asyncio
+async def test_typing_with_window_focus():
+    """Verify typing with target window attempts to focus target before typing, or reports missing window."""
+    with patch("orion.tools.input_control.type_text", return_value=True) as mock_type:
+        # 1. Target window found and focused
+        with patch("orion.tools.input_control.focus_window_by_name", return_value=True) as mock_focus:
+            res_found = await route_and_execute_tool('type "hello" in notepad')
+            assert res_found is not None
+            assert res_found.get("handled") is True
+            assert "⌨️ Typed text into *notepad*." in res_found.get("reply", "")
+            mock_focus.assert_called_once_with("notepad")
+            mock_type.assert_called_once_with("hello")
+            assert re.search(r"</?(?:b|i|s|code|pre)>", res_found["reply"]) is None
+
+        # 2. Target window not found
+        mock_type.reset_mock()
+        with patch("orion.tools.input_control.focus_window_by_name", return_value=False) as mock_focus_fail:
+            res_fail = await route_and_execute_tool('type "ghee khtm" in notepad')
+            assert res_fail is not None
+            assert res_fail.get("handled") is True
+            assert "⚠️ Could not find an active window for *notepad*. Please open it first." in res_fail.get("reply", "")
+            mock_focus_fail.assert_called_once_with("notepad")
+            mock_type.assert_not_called()
+            assert re.search(r"</?(?:b|i|s|code|pre)>", res_fail["reply"]) is None
+

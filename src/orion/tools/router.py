@@ -1480,37 +1480,50 @@ def check_deterministic_watchdog_query(
     return None
 
 
-def _clean_type_payload(raw: str) -> str:
-    """Extract clean text to type by stripping enclosing quotes and trailing window targets."""
+def _parse_typing_target_and_payload(raw: str) -> tuple[str, str | None]:
+    """Parse raw typing payload into (clean_payload, target_app)."""
     raw = raw.strip()
-    # 1. Quoted string with optional trailing window clause, e.g. 'type "hello" in notepad'
-    m_quoted = re.match(r'^(["\'])(.*?)\1(?:\s+in\s+.+)?$', raw, re.IGNORECASE | re.DOTALL)
+
+    # 1. Quoted string with optional trailing 'in <app>'
+    # e.g. '"ghee khtm" in notepad' -> ('ghee khtm', 'notepad')
+    # or '"hello"' -> ('hello', None)
+    m_quoted = re.match(r'^(["\'])(.*?)\1(?:\s+in\s+([a-zA-Z0-9_\-\. ]+))?$', raw, re.IGNORECASE | re.DOTALL)
     if m_quoted:
-        return m_quoted.group(2)
+        payload = m_quoted.group(2)
+        target_app = m_quoted.group(3).strip() if m_quoted.group(3) else None
+        return payload, target_app
 
-    # 2. Unquoted string followed by 'in <window>'
-    m_window = re.match(
-        r"^(.+?)\s+in\s+(?:the\s+)?(?:active\s+window|foreground\s+window|window|[a-zA-Z0-9_\-\.]+(?:\.exe)?)$",
-        raw,
-        re.IGNORECASE,
-    )
-    if m_window:
-        cleaned = m_window.group(1).strip()
-    else:
-        cleaned = raw
+    # 2. Unquoted string followed by 'in <app>'
+    # e.g. 'hello in notepad' -> ('hello', 'notepad')
+    m_unquoted = re.match(r"^(.+?)\s+in\s+([a-zA-Z0-9_\-\. ]+)$", raw, re.IGNORECASE)
+    if m_unquoted:
+        payload = m_unquoted.group(1).strip()
+        target_app = m_unquoted.group(2).strip()
+        # Strip enclosing quotes from payload if any
+        if (payload.startswith('"') and payload.endswith('"')) or (payload.startswith("'") and payload.endswith("'")):
+            if len(payload) >= 2:
+                payload = payload[1:-1]
+        return payload, target_app
 
-    # 3. Strip any outer quotes if present
+    # 3. Simple text without window target
+    cleaned = raw
     if (cleaned.startswith('"') and cleaned.endswith('"')) or (cleaned.startswith("'") and cleaned.endswith("'")):
         if len(cleaned) >= 2:
             cleaned = cleaned[1:-1]
-    return cleaned
+    return cleaned, None
+
+
+def _clean_type_payload(raw: str) -> str:
+    """Extract clean text to type by stripping enclosing quotes and trailing window targets."""
+    payload, _ = _parse_typing_target_and_payload(raw)
+    return payload
 
 
 def check_deterministic_input_query(
     clean_text: str,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Deterministically check for remote clipboard inspection/setting and virtual typing/keystrokes (Step 25 / 25.1)."""
+    """Deterministically check for remote clipboard inspection/setting, virtual typing, and keystrokes (Step 25 / 25.1 / 25.2)."""
     clean = clean_text.strip()
     clean_lower = clean.lower().rstrip(".?! ")
     clean_no_punct = re.sub(r"[^\w\s]", "", clean_lower).strip()
@@ -1541,27 +1554,80 @@ def check_deterministic_input_query(
             input_control.set_clipboard_text(target_text)
             return {"handled": True, "reply": "📋 Copied to laptop clipboard."}
 
-    # C. Special Keys & Single Key Press (e.g. "press enter", "press d")
+    # C. Compound Typing & Key Press (e.g. "type d and press enter", "type 'hello' and hit enter in notepad")
+    compound_pat = r"^(?:type|inject\s+text)\s+(.+?)\s+and\s+(?:press|hit)\s+(enter|escape|esc|tab|space|backspace)(?:\s+in\s+([a-zA-Z0-9_\-\. ]+))?$"
+    m_compound = re.match(compound_pat, clean, re.IGNORECASE)
+    if m_compound:
+        raw_payload = m_compound.group(1).strip()
+        special_key = m_compound.group(2).strip()
+        target_app = m_compound.group(3).strip() if m_compound.group(3) else None
+
+        clean_payload = _clean_type_payload(raw_payload)
+
+        if target_app:
+            if not input_control.focus_window_by_name(target_app):
+                return {
+                    "handled": True,
+                    "reply": f"⚠️ Could not find an active window for *{target_app}*. Please open it first.",
+                }
+
+        input_control.type_text(clean_payload)
+        input_control.press_special_key(special_key)
+        return {"handled": True, "reply": f"⌨️ Typed *{clean_payload}* and pressed *{special_key.upper()}*."}
+
+    # D. Special Keys & Single Key Press (e.g. "press enter", "press d")
     key_match = re.match(r"^(?:press|hit)\s+(enter|escape|esc|tab|space|backspace|[a-zA-Z0-9])$", clean_lower)
     if key_match:
         key_name = key_match.group(1).strip()
         input_control.press_special_key(key_name)
         return {"handled": True, "reply": f"🔘 Pressed *{key_name.upper()}*."}
 
-    # D. Type Text (Remote Typing)
-    # 1. "type in: <text>", "type this: <text>", "type: <text>"
-    type_m1 = re.match(r"^(?:type\s+(?:this\s+)?in|type\s+this|type):\s*(.+)$", clean, re.IGNORECASE)
+    # E. Type Text (Remote Typing with target window support)
+    # 1. "type in <app>: <text>", "type in: <text>", "type this: <text>", "type: <text>"
+    type_m1 = re.match(
+        r"^(?:type\s+(?:this\s+)?in\s+([a-zA-Z0-9_\-\. ]+)|type\s+(?:this\s+)?in|type\s+this|type):\s*(.+)$",
+        clean,
+        re.IGNORECASE,
+    )
     # 2. "type <text>", "inject text <text>"
     type_m2 = re.match(r"^(?:type|inject\s+text)\s+(.+)$", clean, re.IGNORECASE)
     # 3. "type key <char>"
     type_m3 = re.match(r"^type\s+key\s+([a-zA-Z0-9])$", clean, re.IGNORECASE)
-    type_match = type_m1 or type_m2 or type_m3
-    if type_match:
-        raw_payload = type_match.group(1).strip()
-        target_string = _clean_type_payload(raw_payload)
-        if not target_string.lower().startswith("of "):
-            input_control.type_text(target_string)
-            return {"handled": True, "reply": "⌨️ Typed text into active window."}
+
+    if type_m1:
+        target_app = type_m1.group(1).strip() if type_m1.group(1) else None
+        raw_payload = type_m1.group(2).strip()
+        clean_payload, inferred_target = _parse_typing_target_and_payload(raw_payload)
+        target_app = target_app or inferred_target
+        if not clean_payload.lower().startswith("of "):
+            if target_app:
+                if not input_control.focus_window_by_name(target_app):
+                    return {
+                        "handled": True,
+                        "reply": f"⚠️ Could not find an active window for *{target_app}*. Please open it first.",
+                    }
+                input_control.type_text(clean_payload)
+                return {"handled": True, "reply": f"⌨️ Typed text into *{target_app}*."}
+            else:
+                input_control.type_text(clean_payload)
+                return {"handled": True, "reply": "⌨️ Typed text into active window."}
+
+    elif type_m2 or type_m3:
+        m = type_m2 or type_m3
+        raw_payload = m.group(1).strip()
+        clean_payload, target_app = _parse_typing_target_and_payload(raw_payload)
+        if not clean_payload.lower().startswith("of "):
+            if target_app:
+                if not input_control.focus_window_by_name(target_app):
+                    return {
+                        "handled": True,
+                        "reply": f"⚠️ Could not find an active window for *{target_app}*. Please open it first.",
+                    }
+                input_control.type_text(clean_payload)
+                return {"handled": True, "reply": f"⌨️ Typed text into *{target_app}*."}
+            else:
+                input_control.type_text(clean_payload)
+                return {"handled": True, "reply": "⌨️ Typed text into active window."}
 
     return None
 
