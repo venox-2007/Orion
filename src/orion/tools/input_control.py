@@ -262,6 +262,55 @@ def press_special_key(key_name: str, target_app: str | None = None) -> bool:
         return False
 
 
+def force_foreground_window(hwnd: int) -> bool:
+    """Foolproof foreground window activation bypassing Windows 11 thread restrictions."""
+    if not hwnd:
+        return False
+
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        # 1. Check if already active
+        if user32.GetForegroundWindow() == hwnd:
+            return True
+
+        # 2. Restore if minimized
+        SW_RESTORE = 9
+        SW_SHOW = 5
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)
+        else:
+            user32.ShowWindow(hwnd, SW_SHOW)
+
+        # 3. Bypass Windows 11 foreground lock using AttachThreadInput
+        fg_hwnd = user32.GetForegroundWindow()
+        fg_thread = user32.GetWindowThreadProcessId(fg_hwnd, None)
+        cur_thread = kernel32.GetCurrentThreadId()
+
+        if fg_thread and fg_thread != cur_thread:
+            user32.AttachThreadInput(cur_thread, fg_thread, True)
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            user32.AttachThreadInput(cur_thread, fg_thread, False)
+        else:
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+
+        # 4. Settle & verify: poll for up to 0.5s until user32.GetForegroundWindow() == hwnd
+        import time
+
+        for _ in range(10):
+            time.sleep(0.05)
+            if user32.GetForegroundWindow() == hwnd:
+                return True
+
+        return user32.GetForegroundWindow() == hwnd
+    except Exception as e:
+        logger.warning("Failed to force foreground window (%s): %s", hwnd, e)
+        return False
+
+
 def focus_window_by_name(target_name: str) -> bool:
     """Find and bring to foreground an active visible window matching target_name."""
     clean_target = target_name.strip().lower()
@@ -344,25 +393,10 @@ def focus_window_by_name(target_name: str) -> bool:
         if not found_hwnd:
             return False
 
-        # If minimized, restore it: ShowWindow(hwnd, 9) (SW_RESTORE)
-        user32.ShowWindow(found_hwnd, 9)
-
-        if hasattr(user32, "BringWindowToTop"):
-            try:
-                user32.BringWindowToTop(found_hwnd)
-            except Exception:
-                pass
-        if hasattr(user32, "SwitchToThisWindow"):
-            try:
-                user32.SwitchToThisWindow(found_hwnd, True)
-            except Exception:
-                pass
-        user32.SetForegroundWindow(found_hwnd)
-        set_last_target_app(clean_target)
-        import time
-
-        time.sleep(0.15)
-        return True
+        success = force_foreground_window(found_hwnd)
+        if success:
+            set_last_target_app(clean_target)
+        return success
     except Exception as e:
         logger.warning("Failed to focus window for %s: %s", target_name, e)
         return False

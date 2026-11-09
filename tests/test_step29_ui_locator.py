@@ -125,12 +125,12 @@ async def test_app_targeted_ui_clicking():
         assert "🖱️ Located and clicked *save* in *notepad*." in res2.get("reply", "")
         mock_focus.assert_called_with("notepad")
 
-        # 3. Target app window not found
+        # 3. Target app window focus failed
         mock_focus.reset_mock()
         mock_focus.return_value = False
         res_fail = await route_and_execute_tool("click view on missingapp")
         assert res_fail is not None and res_fail.get("handled") is True
-        assert "⚠️ Could not find an active window for *missingapp*. Please open it first." in res_fail.get("reply", "")
+        assert "⚠️ Found *missingapp*, but could not bring it to the foreground." in res_fail.get("reply", "")
 
 
 def test_uiautomation_tree_inspection_mocked():
@@ -160,4 +160,75 @@ def test_uiautomation_tree_inspection_mocked():
 
         coords = find_element_coordinates("View")
         assert coords == (330, 220)
+
+
+def test_force_foreground_window_mocked():
+    """Verify force_foreground_window handles active, iconic, and thread attachment."""
+    from orion.tools.input_control import force_foreground_window
+
+    # 1. Already active
+    with patch("ctypes.windll.user32.GetForegroundWindow", return_value=1234):
+        assert force_foreground_window(1234) is True
+
+    # 2. Iconic (minimized) -> restored with SW_RESTORE (9) and thread attachment
+    with patch("ctypes.windll.user32.GetForegroundWindow", side_effect=[9999, 9999, 1234, 1234]), \
+         patch("ctypes.windll.user32.IsIconic", return_value=1) as mock_iconic, \
+         patch("ctypes.windll.user32.ShowWindow") as mock_show, \
+         patch("ctypes.windll.user32.GetWindowThreadProcessId", return_value=100), \
+         patch("ctypes.windll.kernel32.GetCurrentThreadId", return_value=200), \
+         patch("ctypes.windll.user32.AttachThreadInput") as mock_attach, \
+         patch("ctypes.windll.user32.BringWindowToTop") as mock_top, \
+         patch("ctypes.windll.user32.SetForegroundWindow") as mock_set_fg:
+
+        res = force_foreground_window(1234)
+        assert res is True
+        mock_iconic.assert_called_with(1234)
+        mock_show.assert_called_with(1234, 9)
+        mock_attach.assert_any_call(200, 100, True)
+        mock_attach.assert_any_call(200, 100, False)
+        mock_top.assert_called_with(1234)
+        mock_set_fg.assert_called_with(1234)
+
+
+def test_programmatic_invoke_and_fallback():
+    """Verify programmatic invoke pattern first, with fallback to coordinate click."""
+    from unittest.mock import MagicMock
+    from orion.tools.ui_locator import click_element_by_name
+
+    # 1. Successful GetInvokePattern().Invoke()
+    mock_pattern = MagicMock()
+    mock_ctrl = MagicMock()
+    mock_ctrl.GetInvokePattern.return_value = mock_pattern
+
+    with patch("orion.tools.input_control.focus_window_by_name", return_value=True), \
+         patch("orion.tools.ui_locator._find_uia_control", return_value=mock_ctrl):
+        success, msg = click_element_by_name("Save", target_app="Notepad")
+        assert success is True
+        assert msg == "🖱️ Clicked *Save* in *Notepad*."
+        mock_pattern.Invoke.assert_called_once()
+
+    # 2. Successful Click(simulateMove=False) when Invoke pattern is unavailable
+    mock_ctrl2 = MagicMock()
+    mock_ctrl2.GetInvokePattern.side_effect = Exception("No invoke pattern")
+    mock_ctrl2.Click = MagicMock()
+
+    with patch("orion.tools.ui_locator._find_uia_control", return_value=mock_ctrl2):
+        success2, msg2 = click_element_by_name("File")
+        assert success2 is True
+        assert msg2 == "🖱️ Clicked *File* in *active window*."
+        mock_ctrl2.Click.assert_called_once_with(simulateMove=False)
+
+    # 3. Fallback to coordinate click when direct invoke raises
+    mock_ctrl3 = MagicMock()
+    mock_ctrl3.GetInvokePattern.side_effect = Exception("No pattern")
+    mock_ctrl3.Click.side_effect = Exception("Click failed")
+
+    with patch("orion.tools.input_control.focus_window_by_name", return_value=True), \
+         patch("orion.tools.ui_locator._find_uia_control", return_value=mock_ctrl3), \
+         patch("orion.tools.ui_locator.find_element_coordinates", return_value=(150, 250)), \
+         patch("orion.tools.mouse_control.mouse_click") as mock_mouse_click:
+        success3, msg3 = click_element_by_name("Options", target_app="Settings")
+        assert success3 is True
+        assert msg3 == "🖱️ Located and clicked *Options* in *Settings*."
+        mock_mouse_click.assert_called_once_with(150, 250, button="left", clicks=1)
 

@@ -21,8 +21,8 @@ class RECT(ctypes.Structure):
     ]
 
 
-def _get_control_bounds_uia(clean_label: str) -> tuple[int, int, int, int] | None:
-    """Locate UI element bounds using the Windows UI Automation library (prioritized)."""
+def _find_uia_control(clean_label: str) -> Any | None:
+    """Locate UI element control using the Windows UI Automation library (prioritized)."""
     try:
         import uiautomation as auto  # type: ignore
 
@@ -59,7 +59,7 @@ def _get_control_bounds_uia(clean_label: str) -> tuple[int, int, int, int] | Non
         except Exception as e:
             logger.debug("Root children inspection error: %s", e)
 
-        best_candidate: tuple[int, int, int, int] | None = None
+        best_candidate: Any | None = None
 
         for root_ctrl in search_roots:
             if not root_ctrl:
@@ -69,9 +69,7 @@ def _get_control_bounds_uia(clean_label: str) -> tuple[int, int, int, int] | Non
             try:
                 root_name = (root_ctrl.Name or "").strip().lower()
                 if root_name == clean_label:
-                    r = root_ctrl.BoundingRectangle
-                    if r and r.right > r.left and r.bottom > r.top:
-                        return r.left, r.top, r.right, r.bottom
+                    return root_ctrl
             except Exception:
                 pass
 
@@ -86,16 +84,12 @@ def _get_control_bounds_uia(clean_label: str) -> tuple[int, int, int, int] | Non
 
                         # Prefer exact match
                         if name == clean_label:
-                            r = ctrl.BoundingRectangle
-                            if r and r.right > r.left and r.bottom > r.top:
-                                return r.left, r.top, r.right, r.bottom
+                            return ctrl
 
                         # Substring match (e.g. "File", "Edit", "View", or button text)
                         elif clean_label in name or (auto_id and clean_label in auto_id):
-                            r = ctrl.BoundingRectangle
-                            if r and r.right > r.left and r.bottom > r.top:
-                                if best_candidate is None:
-                                    best_candidate = (r.left, r.top, r.right, r.bottom)
+                            if best_candidate is None:
+                                best_candidate = ctrl
                     except Exception:
                         continue
             except Exception:
@@ -107,6 +101,19 @@ def _get_control_bounds_uia(clean_label: str) -> tuple[int, int, int, int] | Non
     except Exception as e:
         logger.debug("UIAutomation library lookup error: %s", e)
 
+    return None
+
+
+def _get_control_bounds_uia(clean_label: str) -> tuple[int, int, int, int] | None:
+    """Locate UI element bounds using the Windows UI Automation library."""
+    ctrl = _find_uia_control(clean_label)
+    if ctrl is not None:
+        try:
+            r = ctrl.BoundingRectangle
+            if r and r.right > r.left and r.bottom > r.top:
+                return r.left, r.top, r.right, r.bottom
+        except Exception:
+            pass
     return None
 
 
@@ -214,17 +221,44 @@ def click_element_by_name(
     button: str = "left",
     target_app: str | None = None,
 ) -> tuple[bool, str]:
-    """Locate UI element on active screen and click at its center coordinates."""
+    """Locate UI element on active screen and invoke or click it."""
     clean_label = target_label.strip()
     if not clean_label:
         return False, "⚠️ No UI element name specified."
 
     from orion.tools import input_control
 
+    # 1. Target app activation
     if target_app:
-        if not input_control.focus_window_by_name(target_app):
-            return False, f"⚠️ Could not find an active window for *{target_app}*. Please open it first."
+        focused = input_control.focus_window_by_name(target_app)
+        if not focused:
+            return False, f"⚠️ Found *{target_app}*, but could not bring it to the foreground."
 
+    # 2. Native UIAutomation Action Pattern First
+    if button == "left" and clicks == 1:
+        ctrl = _find_uia_control(clean_label.lower())
+        if ctrl is not None:
+            invoked = False
+            try:
+                pattern = ctrl.GetInvokePattern() if hasattr(ctrl, "GetInvokePattern") else None
+                if pattern is not None and hasattr(pattern, "Invoke"):
+                    pattern.Invoke()
+                    invoked = True
+            except Exception:
+                invoked = False
+
+            if not invoked:
+                try:
+                    if hasattr(ctrl, "Click"):
+                        ctrl.Click(simulateMove=False)
+                        invoked = True
+                except Exception:
+                    invoked = False
+
+            if invoked:
+                return True, f"🖱️ Clicked *{clean_label}* in *{target_app or 'active window'}*."
+
+    # 3. Coordinate Click Fallback
     coords = find_element_coordinates(clean_label)
 
     if coords is not None:
