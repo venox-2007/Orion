@@ -19,6 +19,22 @@ ORION is designed from the ground up to operate locally, respecting user privacy
 
 ---
 
+## Capabilities & Architecture Matrix (Steps 1–29)
+
+| Domain | Capability | Architectural Implementation | Key Triggers / Tools |
+| :--- | :--- | :--- | :--- |
+| **Local LLM & Planning** | Autonomous Agent Core | Local Ollama (`qwen3.5:4b`), multi-step planning & confirmation workflows | `/plan <goal>`, multi-step tools |
+| **Voice & Speech** | Offline Transcriber | `faster-whisper` (CPU int8), 60s voice note ingestion | Telegram voice notes |
+| **Personal Productivity** | Tasks & Reminders | Persistent SQLite to-do engine & lightweight background reminder scheduler | `/tasks`, `remind me in 10m to...` |
+| **Workstation & Power** | Process & Power Control | Top resource hogs inspection, guarded process termination, monitor shutoff, system sleep, web navigation | `what's eating my cpu`, `close notepad`, `turn off screen`, `sleep laptop`, `open google.com` |
+| **Autonomous Watchdog** | Proactive Background Daemon | Periodic battery threshold (<20%, <10%, 100%), power plug, and thermal spike debounced alerting | `watchdog status`, `pause watchdog`, `resume watchdog` |
+| **Virtual Input & Typing** | Keystrokes & Clipboard | Windows `SendInput` (Unicode), native clipboard read/write, compound key chaining, persistent active window focus | `get clipboard`, `copy <text>`, `type "hello" in notepad`, `type d and press enter` |
+| **Long-Term Memory** | Fact Store & Briefings | SQLite `orion_memories` table, slug generation, Ollama prompt injection hook, daily executive briefing | `remember that <fact>`, `show memories`, `forget memory <id>`, `morning briefing` |
+| **Remote Shell Bridge** | Non-blocking Terminal | Asynchronous PowerShell & CMD runner, dangerous command blocklist, 25s timeout & 3.5k output cap | `ps: <cmd>`, `cmd: <cmd>`, `run: <cmd>` |
+| **Vision & Coordinates** | Mouse & UI Automation | Native mouse positioning, clicks, scrolling (`user32`), and UI Automation element auto-clicker | `click at <x>, <y>`, `scroll down <n>`, `where is my mouse`, `click on Save button` |
+
+---
+
 ## Getting Started
 
 ### Prerequisites
