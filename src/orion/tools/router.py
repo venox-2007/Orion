@@ -1799,11 +1799,12 @@ def check_deterministic_mouse_query(
         mouse_control.mouse_scroll(steps=steps, direction=direction)
         return {"handled": True, "reply": f"📜 Scrolled {direction} ({steps} steps)."}
 
-    # E. CLICK UI ELEMENT BY NAME (Step 29)
-    ui_click_pat = r"^(?:click|tap|press)\s+(?:on\s+)?(?:the\s+)?([a-zA-Z0-9_\- ]+?)(?:\s+button|\s+tab|\s+menu)?$"
+    # E. CLICK UI ELEMENT BY NAME (Steps 29 & 29.1)
+    ui_click_pat = r"^(?:click|tap|press)\s+(?:on\s+)?(?:the\s+)?([a-zA-Z0-9_\- ]+?)(?:\s+button|\s+tab|\s+menu)?(?:\s+(?:in|on)\s+([a-zA-Z0-9_\-\. ]+))?$"
     m_ui = re.match(ui_click_pat, clean.rstrip(".?! "), re.IGNORECASE)
     if m_ui:
         element_name = m_ui.group(1).strip()
+        target_app = m_ui.group(2).strip() if m_ui.group(2) else None
         excluded = {"mouse", "cursor", "left", "right", "middle", "double"}
         special_keys = {"enter", "return", "escape", "esc", "tab", "space", "backspace"}
         if (
@@ -1813,7 +1814,10 @@ def check_deterministic_mouse_query(
         ):
             from orion.tools import ui_locator
 
-            success, reply_msg = ui_locator.click_element_by_name(element_name)
+            if target_app:
+                success, reply_msg = ui_locator.click_element_by_name(element_name, target_app=target_app)
+            else:
+                success, reply_msg = ui_locator.click_element_by_name(element_name)
             return {"handled": True, "reply": reply_msg}
 
     return None

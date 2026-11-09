@@ -100,3 +100,64 @@ async def test_router_ui_click_queries():
         assert res_missing is not None and res_missing.get("handled") is True
         assert "⚠️ Could not locate UI element *MissingBtn* on the active screen." in res_missing.get("reply", "")
         mock_click_elem.assert_called_once_with("MissingBtn")
+
+
+@pytest.mark.asyncio
+async def test_app_targeted_ui_clicking():
+    """Verify app-targeting syntax 'click <elem> on <app>' and 'click <elem> in <app>' (Step 29.1)."""
+    with patch("orion.tools.input_control.focus_window_by_name", return_value=True) as mock_focus, \
+         patch("orion.tools.ui_locator.find_element_coordinates", return_value=(340, 240)), \
+         patch("orion.tools.mouse_control.mouse_click", return_value=True) as mock_click:
+
+        # 1. "click view on notepad"
+        res1 = await route_and_execute_tool("click view on notepad")
+        assert res1 is not None and res1.get("handled") is True
+        assert "🖱️ Located and clicked *view* in *notepad*." in res1.get("reply", "")
+        mock_focus.assert_called_with("notepad")
+        mock_click.assert_called_with(340, 240, button="left", clicks=1)
+        assert re.search(r"</?(?:b|i|s|code|pre)>", res1["reply"]) is None
+
+        # 2. "click save in notepad"
+        mock_focus.reset_mock()
+        mock_click.reset_mock()
+        res2 = await route_and_execute_tool("click save in notepad")
+        assert res2 is not None and res2.get("handled") is True
+        assert "🖱️ Located and clicked *save* in *notepad*." in res2.get("reply", "")
+        mock_focus.assert_called_with("notepad")
+
+        # 3. Target app window not found
+        mock_focus.reset_mock()
+        mock_focus.return_value = False
+        res_fail = await route_and_execute_tool("click view on missingapp")
+        assert res_fail is not None and res_fail.get("handled") is True
+        assert "⚠️ Could not find an active window for *missingapp*. Please open it first." in res_fail.get("reply", "")
+
+
+def test_uiautomation_tree_inspection_mocked():
+    """Verify uiautomation walks UI controls and finds MenuItemControl/ButtonControl."""
+    from unittest.mock import MagicMock
+
+    mock_rect = MagicMock()
+    mock_rect.left = 300
+    mock_rect.top = 200
+    mock_rect.right = 360
+    mock_rect.bottom = 240
+
+    mock_ctrl = MagicMock()
+    mock_ctrl.Name = "View"
+    mock_ctrl.AutomationId = "ViewMenu"
+    mock_ctrl.BoundingRectangle = mock_rect
+
+    mock_win = MagicMock()
+    mock_win.Name = "Notepad"
+    mock_win.ControlTypeName = "WindowControl"
+    mock_win.GetChildren.return_value = []
+    mock_win.BoundingRectangle = None
+
+    with patch("uiautomation.GetForegroundControl", return_value=mock_win), \
+         patch("uiautomation.GetFocusedControl", return_value=mock_win), \
+         patch("uiautomation.WalkControl", return_value=[(mock_ctrl, 1)]):
+
+        coords = find_element_coordinates("View")
+        assert coords == (330, 220)
+

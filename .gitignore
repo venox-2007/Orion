@@ -55,6 +55,7 @@ memories/
 # Logs
 logs/
 *.log
+@AutomationLog.txt
 
 # Unit test / coverage / tooling caches
 .pytest_cache/

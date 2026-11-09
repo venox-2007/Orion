@@ -1,4 +1,4 @@
-"""Computer vision & grounded UI element locator for ORION (Step 29)."""
+"""Computer vision & grounded UI element locator for ORION (Steps 29 & 29.1)."""
 
 from __future__ import annotations
 
@@ -22,35 +22,90 @@ class RECT(ctypes.Structure):
 
 
 def _get_control_bounds_uia(clean_label: str) -> tuple[int, int, int, int] | None:
-    """Attempt to locate UI element using the Windows UI Automation library if available."""
+    """Locate UI element bounds using the Windows UI Automation library (prioritized)."""
     try:
         import uiautomation as auto  # type: ignore
 
-        # 1. Check foreground control first
-        fg_ctrl = auto.GetForegroundControl()
-        if fg_ctrl:
-            target = fg_ctrl.Control(
-                searchDepth=3,
-                Compare=lambda c, d: clean_label in c.Name.lower() or clean_label in c.AutomationId.lower(),
-            )
-            if target and target.Exists(maxSearchSeconds=0.3):
-                rect = target.BoundingRectangle
-                if rect and rect.right > rect.left and rect.bottom > rect.top:
-                    return rect.left, rect.top, rect.right, rect.bottom
+        # 1. Prioritize active foreground or focused window
+        search_roots = []
+        try:
+            fg_ctrl = auto.GetForegroundControl() or auto.GetFocusedControl()
+            if fg_ctrl:
+                top_win = fg_ctrl
+                curr = fg_ctrl
+                for _ in range(8):
+                    if curr is None:
+                        break
+                    if getattr(curr, "ControlTypeName", "") == "WindowControl":
+                        top_win = curr
+                        break
+                    try:
+                        curr = curr.GetParentControl()
+                    except Exception:
+                        break
+                search_roots.append(top_win)
+                if fg_ctrl != top_win:
+                    search_roots.append(fg_ctrl)
+        except Exception as e:
+            logger.debug("Foreground control inspection error: %s", e)
 
-        # 2. Check root desktop controls
-        root = auto.GetRootControl()
-        if root:
-            target = root.Control(
-                searchDepth=2,
-                Compare=lambda c, d: clean_label in c.Name.lower() or clean_label in c.AutomationId.lower(),
-            )
-            if target and target.Exists(maxSearchSeconds=0.3):
-                rect = target.BoundingRectangle
-                if rect and rect.right > rect.left and rect.bottom > rect.top:
-                    return rect.left, rect.top, rect.right, rect.bottom
+        # 2. Also inspect active top-level WindowControls from root
+        try:
+            root = auto.GetRootControl()
+            if root:
+                for win in root.GetChildren():
+                    if win not in search_roots:
+                        search_roots.append(win)
+        except Exception as e:
+            logger.debug("Root children inspection error: %s", e)
+
+        best_candidate: tuple[int, int, int, int] | None = None
+
+        for root_ctrl in search_roots:
+            if not root_ctrl:
+                continue
+
+            # Check root control itself
+            try:
+                root_name = (root_ctrl.Name or "").strip().lower()
+                if root_name == clean_label:
+                    r = root_ctrl.BoundingRectangle
+                    if r and r.right > r.left and r.bottom > r.top:
+                        return r.left, r.top, r.right, r.bottom
+            except Exception:
+                pass
+
+            # Walk child controls up to depth 5 (supports XAML/WinUI 3 MenuItemControl, ButtonControl, etc.)
+            try:
+                for ctrl, depth in auto.WalkControl(root_ctrl, maxDepth=5):
+                    if ctrl is None:
+                        continue
+                    try:
+                        name = (ctrl.Name or "").strip().lower()
+                        auto_id = (ctrl.AutomationId or "").strip().lower()
+
+                        # Prefer exact match
+                        if name == clean_label:
+                            r = ctrl.BoundingRectangle
+                            if r and r.right > r.left and r.bottom > r.top:
+                                return r.left, r.top, r.right, r.bottom
+
+                        # Substring match (e.g. "File", "Edit", "View", or button text)
+                        elif clean_label in name or (auto_id and clean_label in auto_id):
+                            r = ctrl.BoundingRectangle
+                            if r and r.right > r.left and r.bottom > r.top:
+                                if best_candidate is None:
+                                    best_candidate = (r.left, r.top, r.right, r.bottom)
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+
+        if best_candidate is not None:
+            return best_candidate
+
     except Exception as e:
-        logger.debug("UIAutomation library lookup skipped: %s", e)
+        logger.debug("UIAutomation library lookup error: %s", e)
 
     return None
 
@@ -122,12 +177,27 @@ def find_element_coordinates(target_label: str) -> tuple[int, int] | None:
     if not clean_label:
         return None
 
-    # 1. Try Windows UI Automation if available
+    # 1. Try Windows UI Automation if available (prioritized for modern Windows 11 apps)
     bounds = _get_control_bounds_uia(clean_label)
 
     # 2. Fall back to native Win32 child window and control enumeration
     if bounds is None:
         bounds = _get_control_bounds_native(clean_label)
+
+    # 3. State reset: if element not found, a previous click might have left a menu open; tap ESC and retry
+    if bounds is None:
+        try:
+            from orion.tools import input_control
+
+            input_control.press_special_key("escape")
+            import time
+
+            time.sleep(0.05)
+            bounds = _get_control_bounds_uia(clean_label)
+            if bounds is None:
+                bounds = _get_control_bounds_native(clean_label)
+        except Exception:
+            pass
 
     if bounds is not None:
         left, top, right, bottom = bounds
@@ -142,18 +212,30 @@ def click_element_by_name(
     target_label: str,
     clicks: int = 1,
     button: str = "left",
+    target_app: str | None = None,
 ) -> tuple[bool, str]:
     """Locate UI element on active screen and click at its center coordinates."""
     clean_label = target_label.strip()
     if not clean_label:
         return False, "⚠️ No UI element name specified."
 
+    from orion.tools import input_control
+
+    if target_app:
+        if not input_control.focus_window_by_name(target_app):
+            return False, f"⚠️ Could not find an active window for *{target_app}*. Please open it first."
+
     coords = find_element_coordinates(clean_label)
+
     if coords is not None:
         x, y = coords
         from orion.tools import mouse_control
 
         mouse_control.mouse_click(x, y, button=button, clicks=clicks)
+        if target_app:
+            return True, f"🖱️ Located and clicked *{clean_label}* in *{target_app}*."
         return True, f"🖱️ Located and clicked *{clean_label}* at ({x}, {y})."
 
+    if target_app:
+        return False, f"⚠️ Could not locate UI element *{clean_label}* in *{target_app}*."
     return False, f"⚠️ Could not locate UI element *{clean_label}* on the active screen."
