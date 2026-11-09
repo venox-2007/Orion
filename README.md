@@ -165,6 +165,58 @@ pytest
 
 ---
 
+## Repository Structure
+
+```text
+Orion/
+├── src/
+│   └── orion/
+│       ├── bot.py                     # Entry point for Telegram bot daemon
+│       ├── main.py                    # FastAPI application entry point
+│       ├── config/
+│       │   └── settings.py            # Pydantic environment configuration
+│       ├── core/
+│       │   ├── briefing.py            # Executive daily briefing aggregation engine (Step 26)
+│       │   ├── execution_engine.py    # Multi-step action plan validation & execution
+│       │   ├── memory_store.py        # SQLite persistent long-term memory store (Step 26)
+│       │   ├── models.py              # Core data models and schemas
+│       │   ├── planner.py             # Action plan generator
+│       │   ├── reminders.py           # Personal reminder management & scheduler (Step 17)
+│       │   ├── tasks.py               # Personal to-do & task management engine (Step 19)
+│       │   └── watchdog.py            # Autonomous background system monitoring daemon (Step 24)
+│       ├── integrations/
+│       │   ├── formatter.py           # Telegram Markdown/HTML converter & sanitizer
+│       │   ├── ollama.py              # Local Ollama client & prompt generator
+│       │   └── telegram_bot.py        # Telegram long-polling bot & command handlers
+│       ├── memory/
+│       │   └── database.py            # SQLite conversation history & workflow store
+│       ├── tools/
+│       │   ├── app_launcher.py        # Windows application whitelist & launcher
+│       │   ├── desktop_inspector.py   # Windows desktop window inspector
+│       │   ├── file_bridge.py         # Telegram document upload & download bridge (Step 22)
+│       │   ├── filesystem.py          # Sandboxed directory reader & searcher
+│       │   ├── filesystem_actions.py  # Sandboxed single file mutations with confirmation
+│       │   ├── input_control.py       # Virtual keystroke injection & remote clipboard (Step 25)
+│       │   ├── mouse_control.py       # Remote cursor positioning, clicks, and scrolling (Step 28)
+│       │   ├── process_manager.py     # Process monitoring & safe app termination (Step 23)
+│       │   ├── registry.py            # Tool registry & execution dispatcher
+│       │   ├── router.py              # Waterfall deterministic intent routing engine
+│       │   ├── screen_capture.py      # Desktop screenshot capture (Step 20)
+│       │   ├── security.py            # Path sandboxing & security guards
+│       │   ├── shell_bridge.py        # Asynchronous PowerShell & CMD runner (Step 27)
+│       │   ├── system.py              # Read-only hardware & vitals inspector
+│       │   ├── ui_locator.py          # Accessibility-based UI element locator & clicker (Step 29)
+│       │   └── workstation.py         # Workstation power states & web navigation (Step 21/23)
+│       └── voice/
+│           └── transcriber.py         # Local offline faster-whisper speech-to-text
+├── tests/                             # Comprehensive automated test suites (Steps 1–29)
+├── .env.example                       # Documented environment configuration sample
+├── pyproject.toml                     # Project dependencies & metadata
+└── README.md
+```
+
+---
+
 ## Security & Privacy Guidelines
 
 - **Owner-only Access**: Only the configured Telegram user ID can interact with the bot in private chats. Unauthorized users are rejected.
