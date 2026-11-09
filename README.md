@@ -101,6 +101,61 @@ This launches the FastAPI service (accessible at `http://127.0.0.1:8000/health`)
 - `/history`: Inspect recent execution history.
 - `/cancel`: Cancel pending execution proposals.
 
+### Deterministic Command Cheatsheet
+
+ORION executes core workstation, input, terminal, memory, and monitoring commands deterministically with zero latency, zero cloud costs, and no LLM fall-through.
+
+#### 1. Remote Shell & Terminal
+| Trigger Pattern | Action |
+| :--- | :--- |
+| `ps: <command>` | Run PowerShell command asynchronously (`ps: Get-Process`) |
+| `cmd: <command>` | Run CMD command (`cmd: dir /b`) |
+| `run: <command>` | Alias for terminal execution (`run: ipconfig`) |
+
+#### 2. Virtual Input & Keystroke Injection
+| Trigger Pattern | Action |
+| :--- | :--- |
+| `type <text> in <app>` | Bring target app to foreground and inject Unicode text (`type "Hello" in notepad`) |
+| `type <text> and press enter` | Inject text into active window and press special key |
+| `press <key>` | Tap special navigation/action key (`press enter`, `press esc`, `press tab`) |
+| `get clipboard` | Read current text on the Windows clipboard (`what's on my clipboard`) |
+| `copy <text>` | Set Windows clipboard contents (`copy: https://github.com`) |
+
+#### 3. Mouse Control & UI Vision
+| Trigger Pattern | Action |
+| :--- | :--- |
+| `click at <x>, <y>` | Move mouse cursor to screen coordinates and click (`click at 500, 400`) |
+| `click <element name>` | Locate named UI control via Windows accessibility and click center (`click on Save button`, `click File`) |
+| `double click [at <x>, <y>]` | Double-click active position or specified coordinates (`double click at 200, 300`) |
+| `right click [at <x>, <y>]` | Right-click active position or specified coordinates |
+| `scroll down <n>` / `scroll up <n>` | Scroll active window vertically by *n* wheel steps (`scroll down 5`) |
+| `where is my mouse` | Inspect current cursor coordinates on screen (`get mouse pos`) |
+
+#### 4. Workstation, Processes & Power
+| Trigger Pattern | Action |
+| :--- | :--- |
+| `what's eating my ram` | List top memory-consuming processes (`top ram processes`) |
+| `what's eating my cpu` | List top CPU-consuming processes (`top cpu processes`) |
+| `close <app>` | Safely terminate user application by name or alias (`close chrome`, `kill notepad`) |
+| `turn off screen` | Immediately power down display monitors (`turn off display`) |
+| `sleep laptop` | Safely put computer to sleep via Windows power APIs |
+| `open <url>` / `search <query>` | Open link in default browser or perform Google search (`search quantum computing`) |
+
+#### 5. Long-Term Memory & Executive Briefings
+| Trigger Pattern | Action |
+| :--- | :--- |
+| `morning briefing` / `daily briefing` | Generate full executive report (vitals, pending tasks, reminders, memories) |
+| `remember that <fact>` | Save persistent fact with auto-slug key (`remember that server port is 8080`) |
+| `show memories` / `my memories` | List all stored facts (`what do you remember about me`) |
+| `forget memory <id or key>` | Delete a stored memory by numeric ID or slug key |
+
+#### 6. Autonomous Watchdog
+| Trigger Pattern | Action |
+| :--- | :--- |
+| `watchdog status` | Check battery, load, and background monitoring status |
+| `pause watchdog` | Temporarily halt proactive background alerts |
+| `resume watchdog` | Resume proactive background monitoring alerts |
+
 ### Running Tests
 
 Execute the automated test suite:
