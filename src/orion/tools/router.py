@@ -1217,6 +1217,70 @@ def check_deterministic_repeat_query(
     return None
 
 
+async def check_deterministic_macro_and_workflow_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check for macro management and named macro execution (Step 30)."""
+    clean = clean_text.strip()
+    if not clean:
+        return None
+
+    clean_no_punct = clean.rstrip(".?! ")
+
+    from orion.core.macro_store import get_macro_store
+    from orion.core.workflow_runner import execute_workflow, split_chained_commands
+
+    macro_store = get_macro_store()
+
+    # 1. Save Macro: "macro save <name>: <cmd1> then <cmd2>" or "create macro <name>: ..."
+    save_pat = r"^(?:macro\s+save|create\s+macro)\s+([a-zA-Z0-9_\-]+):\s*(.+)$"
+    m_save = re.match(save_pat, clean, re.IGNORECASE) or re.match(save_pat, clean_no_punct, re.IGNORECASE)
+    if m_save:
+        name = m_save.group(1).strip().lower()
+        body = m_save.group(2).strip()
+        steps = split_chained_commands(body)
+        if not steps:
+            return {"handled": True, "reply": "⚠️ Macro must contain at least one valid command step."}
+
+        macro_store.save_macro(name, steps)
+        step_word = "step" if len(steps) == 1 else "steps"
+        return {"handled": True, "reply": f"⚡ *Macro '{name}' saved* with {len(steps)} {step_word}."}
+
+    # 2. List Macros: "list macros", "show macros", "macros"
+    list_pat = r"^(?:list\s+macros|show\s+macros|macros)$"
+    if re.match(list_pat, clean, re.IGNORECASE) or re.match(list_pat, clean_no_punct, re.IGNORECASE):
+        macros = macro_store.list_macros()
+        reply = macro_store.format_macro_list(macros)
+        return {"handled": True, "reply": reply}
+
+    # 3. Delete Macro: "delete macro <name>", "forget macro <name>"
+    del_pat = r"^(?:delete\s+macro|forget\s+macro)\s+([a-zA-Z0-9_\-]+)$"
+    m_del = re.match(del_pat, clean, re.IGNORECASE) or re.match(del_pat, clean_no_punct, re.IGNORECASE)
+    if m_del:
+        name = m_del.group(1).strip().lower()
+        deleted = macro_store.delete_macro(name)
+        if deleted:
+            return {"handled": True, "reply": f"🗑️ *Macro '{name}' deleted.*"}
+        return {"handled": True, "reply": f"⚠️ Macro '*{name}*' not found."}
+
+    # 4. Run Named Macro: "run macro <name>", "execute macro <name>", "macro run <name>", "macro <name>"
+    run_pat = r"^(?:run\s+macro|execute\s+macro|macro\s+run|macro)\s+([a-zA-Z0-9_\-]+)$"
+    m_run = re.match(run_pat, clean, re.IGNORECASE) or re.match(run_pat, clean_no_punct, re.IGNORECASE)
+    if m_run:
+        name = m_run.group(1).strip().lower()
+        if name in ("save", "list", "show", "delete", "forget", "help"):
+            return None
+
+        macro = macro_store.get_macro(name)
+        if not macro:
+            return {"handled": True, "reply": f"⚠️ Macro '*{name}*' not found."}
+
+        return await execute_workflow(macro["steps"], route_and_execute_tool, context=context)
+
+    return None
+
+
 def check_deterministic_file_fetch_query(
     clean_text: str,
     context: dict[str, Any] | None = None,
@@ -2485,6 +2549,19 @@ async def route_and_execute_tool(
     repeat_res = check_deterministic_repeat_query(clean_text, context=context)
     if repeat_res:
         return repeat_res
+
+    # 0.1. Deterministic macro management & named macro execution (Step 30)
+    macro_res = await check_deterministic_macro_and_workflow_query(clean_text, context=context)
+    if macro_res:
+        return macro_res
+
+    # 0.2. Ad-hoc workflow chaining via 'then', '&&', ';' (Step 30)
+    if not (context and context.get("_in_workflow")):
+        from orion.core.workflow_runner import execute_workflow, split_chained_commands
+
+        chained_steps = split_chained_commands(clean_text)
+        if len(chained_steps) > 1:
+            return await execute_workflow(chained_steps, route_and_execute_tool, context=context)
 
     # 1. Deterministic multi-action and sequential command detection
     multi_res = check_deterministic_multi_action(clean_text)
