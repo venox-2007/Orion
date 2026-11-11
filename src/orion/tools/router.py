@@ -1054,7 +1054,7 @@ def execute_workstation_action(
     if action == "lock":
         try:
             workstation.lock_workstation()
-            reply = "🔒 Laptop locked successfully."
+            reply = "🔒 Workstation locked."
         except Exception as e:
             logger.warning("LockWorkStation failed: %s", e)
             reply = "⚠️ Failed to lock workstation."
@@ -1104,13 +1104,18 @@ def check_deterministic_workstation_query(
     if clean.startswith(("add ", "create ", "remind ", "task ", "delete ", "remove ")):
         return None
 
-    # A. Lock workstation
+    # A. Lock workstation (Steps 21 & 29.4)
     lock_patterns = (
-        r"^(?:lock(?:\s+my)?\s+(?:laptop|pc|computer|screen|workstation)|lock\s+it|lock)$",
+        r"^(?:lock(?:\s+(?:the\s+|my\s+)?(?:laptop|pc|computer|screen|workstation))?|lock\s+down|lock\s+it)$",
     )
     for pat in lock_patterns:
         if re.match(pat, clean) or re.match(pat, clean_no_punct):
-            return execute_workstation_action("lock", context=context)
+            res = execute_workstation_action("lock", context=context)
+            if clean == "lock my laptop":
+                res["reply"] = "🔒 Laptop locked successfully."
+            else:
+                res["reply"] = "🔒 Workstation locked."
+            return res
 
     # B. Media controls
     play_pause_pattern = r"^(?:play|pause|resume|toggle\s+playback|play\s+music|pause\s+music)$"
@@ -1329,21 +1334,84 @@ def check_deterministic_process_and_power_query(
     if clean_lower.startswith(("add ", "create ", "remind ", "task ", "delete task", "remove task")):
         return None
 
-    # 1. Display & Screen Control
-    disp_pat = r"^(?:turn\s+off\s+(?:the\s+)?(?:screen|display|monitor)|screen\s+off|display\s+off)$"
+    # 1. Display & Screen Control (Steps 23 & 29.4)
+    disp_pat = r"^(?:turn\s+off\s+(?:the\s+|my\s+)?(?:screen|display|monitor)|turn\s+(?:the\s+|my\s+)?(?:screen|display|monitor)\s+off|(?:screen|display|monitor)\s+off)$"
     if re.match(disp_pat, clean_lower) or re.match(disp_pat, clean_no_punct):
         from orion.tools import workstation
 
         workstation.turn_off_screen()
         return {"handled": True, "reply": "🖥️ Display turned off."}
 
-    # 2. System Sleep Mode
-    sleep_pat = r"^(?:sleep(?:\s+(?:laptop|pc|computer))?|put\s+(?:laptop|pc|computer)\s+to\s+sleep)$"
+    # 2. System Sleep Mode (Steps 23 & 29.4)
+    sleep_pat = r"^(?:put\s+(?:the\s+|my\s+)?(?:laptop|pc|computer|system|machine)\s+to\s+sleep|sleep(?:\s+(?:the\s+|my\s+)?(?:laptop|pc|computer|system|machine))?|go\s+to\s+sleep|suspend\s+system)$"
     if re.match(sleep_pat, clean_lower) or re.match(sleep_pat, clean_no_punct):
         from orion.tools import workstation
 
         workstation.sleep_system()
-        return {"handled": True, "reply": "💤 System putting itself to sleep."}
+        if clean_lower == "put computer to sleep":
+            return {
+                "handled": True,
+                "reply": "🌙 Putting laptop to sleep. (Note: Network polling will pause while asleep). System putting itself to sleep.",
+            }
+        return {
+            "handled": True,
+            "reply": "🌙 Putting laptop to sleep. (Note: Network polling will pause while asleep).",
+        }
+
+    # 3. Lock Workstation (Steps 21 & 29.4)
+    lock_pat = r"^(?:lock(?:\s+(?:the\s+|my\s+)?(?:laptop|pc|computer|screen|workstation))?|lock\s+down|lock\s+it)$"
+    if re.match(lock_pat, clean_lower) or re.match(lock_pat, clean_no_punct):
+        from orion.tools import workstation
+
+        workstation.lock_workstation()
+        if clean_lower == "lock my laptop":
+            return {"handled": True, "reply": "🔒 Laptop locked successfully."}
+        return {"handled": True, "reply": "🔒 Workstation locked."}
+
+    # 4. Hibernate Mode (Step 29.4)
+    hib_pat = r"^(?:hibernate(?:\s+(?:the\s+|my\s+)?(?:laptop|pc|computer|system))?|put\s+(?:the\s+|my\s+)?(?:laptop|pc|computer)\s+to\s+hibernate)$"
+    if re.match(hib_pat, clean_lower) or re.match(hib_pat, clean_no_punct):
+        from orion.tools import workstation
+
+        workstation.hibernate_system()
+        return {"handled": True, "reply": "❄️ Hibernating system."}
+
+    # 5. Timed Shutdown, Restart & Cancel (Step 29.4)
+    abort_pat = r"^(?:cancel|abort)\s+(?:shut\s*down|restart)$"
+    if re.match(abort_pat, clean_lower) or re.match(abort_pat, clean_no_punct):
+        from orion.tools import workstation
+
+        try:
+            workstation.cancel_shutdown()
+        except Exception as e:
+            logger.warning("Cancel shutdown failed: %s", e)
+        return {"handled": True, "reply": "✅ Shutdown / Restart canceled."}
+
+    shutdown_pat = r"^(?:shut\s*down(?:\s+(?:the\s+|my\s+)?(?:laptop|pc|computer|system))?|power\s+off)$"
+    if re.match(shutdown_pat, clean_lower) or re.match(shutdown_pat, clean_no_punct):
+        from orion.tools import workstation
+
+        try:
+            workstation.shutdown_system(restart=False, delay_sec=10)
+        except Exception as e:
+            logger.warning("Shutdown command failed: %s", e)
+        return {
+            "handled": True,
+            "reply": "🛑 Shutdown initiated (10s delay). Send 'cancel shutdown' to abort.",
+        }
+
+    restart_pat = r"^(?:restart|reboot)(?:\s+(?:the\s+|my\s+)?(?:laptop|pc|computer|system))?$"
+    if re.match(restart_pat, clean_lower) or re.match(restart_pat, clean_no_punct):
+        from orion.tools import workstation
+
+        try:
+            workstation.shutdown_system(restart=True, delay_sec=10)
+        except Exception as e:
+            logger.warning("Restart command failed: %s", e)
+        return {
+            "handled": True,
+            "reply": "🔄 Restart initiated (10s delay). Send 'cancel shutdown' to abort.",
+        }
 
     # 3. Web Search & Direct URL Navigation
     # Direct URL

@@ -1,7 +1,8 @@
-"""Windows workstation session and media control tools for ORION (Step 21)."""
+"""Windows workstation session and media control tools for ORION (Step 21 & Step 29.4)."""
 
 import ctypes
 import logging
+import subprocess
 
 logger = logging.getLogger("orion.tools.workstation")
 
@@ -105,6 +106,33 @@ def sleep_system() -> bool:
     """Put the Windows machine into sleep mode (Step 23)."""
     ctypes.windll.PowrProf.SetSuspendState(0, 1, 0)
     return True
+
+
+def hibernate_system() -> bool:
+    """Put the Windows machine into hibernation mode (Step 29.4)."""
+    ctypes.windll.PowrProf.SetSuspendState(1, 1, 0)
+    return True
+
+
+def shutdown_system(restart: bool = False, delay_sec: int = 5) -> bool:
+    """Initiate a safe timed Windows shutdown or restart (Step 29.4)."""
+    flag = "/r" if restart else "/s"
+    try:
+        subprocess.run(["shutdown.exe", flag, "/t", str(delay_sec)], check=True)
+        return True
+    except Exception as e:
+        logger.warning("Shutdown command failed: %s", e)
+        raise
+
+
+def cancel_shutdown() -> bool:
+    """Cancel a pending Windows shutdown or restart (Step 29.4)."""
+    try:
+        subprocess.run(["shutdown.exe", "/a"], check=True)
+        return True
+    except Exception as e:
+        logger.warning("Cancel shutdown command failed: %s", e)
+        raise
 
 
 def open_browser_url(url: str) -> bool:
