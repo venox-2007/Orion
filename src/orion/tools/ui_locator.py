@@ -270,6 +270,20 @@ def click_element_by_name(
             return True, f"🖱️ Located and clicked *{clean_label}* in *{target_app}*."
         return True, f"🖱️ Located and clicked *{clean_label}* at ({x}, {y})."
 
+    # 4. OCR Fallback (Step 32): when UIAutomation controls are unavailable
+    try:
+        from orion.tools import screen_ocr
+
+        ocr_coords = screen_ocr.find_text_coordinates_sync(clean_label, target_app=target_app)
+        if ocr_coords is not None:
+            cx, cy = ocr_coords
+            from orion.tools import mouse_control
+
+            mouse_control.mouse_click(cx, cy, button=button, clicks=clicks)
+            return True, f"👁️ OCR-located and clicked *{clean_label}* at ({cx}, {cy})."
+    except Exception as ocr_err:
+        logger.debug("OCR fallback search error for '%s': %s", clean_label, ocr_err)
+
     if target_app:
         return False, f"⚠️ Could not locate UI element *{clean_label}* in *{target_app}*."
     return False, f"⚠️ Could not locate UI element *{clean_label}* on the active screen."

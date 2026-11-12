@@ -1929,6 +1929,42 @@ async def check_deterministic_shell_query(
     return None
 
 
+async def check_deterministic_ocr_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check for screen OCR and text extraction commands (Step 32)."""
+    clean = clean_text.strip()
+    clean_lower = clean.lower().rstrip(".?! ")
+
+    # Match: read screen, read the screen, read text, read text in chrome, ocr, ocr screen, extract text from notepad, etc.
+    ocr_pat = r"^(?:read\s+(?:the\s+)?(?:screen|text|window)|ocr(?:\s+screen)?|extract\s+text)(?:\s+(?:in|on|from)\s+([a-zA-Z0-9_.\- ]+))?$"
+    m_ocr = re.match(ocr_pat, clean_lower)
+    if not m_ocr:
+        return None
+
+    target_app = m_ocr.group(1).strip() if m_ocr.group(1) else None
+
+    from orion.tools import screen_ocr
+
+    ocr_res = await screen_ocr.extract_screen_text(target_app=target_app)
+    title = target_app or "Active Screen"
+
+    if not ocr_res.get("success"):
+        err = ocr_res.get("error", "Failed to perform OCR.")
+        return {"handled": True, "reply": f"⚠️ *Screen OCR ({title}) Failed:*\n{err}"}
+
+    text_content = ocr_res.get("text", "").strip()
+    if not text_content:
+        return {"handled": True, "reply": f"👁️ *Screen OCR ({title}):*\n_No text detected on screen._"}
+
+    if len(text_content) > 3000:
+        text_content = text_content[:3000] + "\n... [truncated]"
+
+    reply = f"👁️ *Screen OCR ({title}):*\n```\n{text_content}\n```"
+    return {"handled": True, "reply": reply}
+
+
 def check_deterministic_mouse_query(
     clean_text: str,
     context: dict[str, Any] | None = None,
@@ -2785,6 +2821,11 @@ async def route_and_execute_tool(
     shell_res = await check_deterministic_shell_query(clean_text, context=context)
     if shell_res:
         return shell_res
+
+    # 14.5. Deterministic screen OCR & text extraction (Step 32)
+    ocr_res = await check_deterministic_ocr_query(clean_text, context=context)
+    if ocr_res:
+        return ocr_res
 
     # 15. Deterministic remote mouse & cursor control (Step 28)
     mouse_res = check_deterministic_mouse_query(clean_text, context=context)

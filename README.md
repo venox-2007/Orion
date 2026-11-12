@@ -19,7 +19,7 @@ ORION is designed from the ground up to operate locally, respecting user privacy
 
 ---
 
-## Capabilities & Architecture Matrix (Steps 1–31)
+## Capabilities & Architecture Matrix (Steps 1–32)
 
 | Domain | Capability | Architectural Implementation | Key Triggers / Tools |
 | :--- | :--- | :--- | :--- |
@@ -34,6 +34,7 @@ ORION is designed from the ground up to operate locally, respecting user privacy
 | **Vision & Coordinates** | Mouse & UI Automation | Native mouse positioning, clicks, scrolling (`user32`), and UIAutomation accessibility element clicker | `click at <x>, <y>`, `scroll down <n>`, `where is my mouse`, `click Save on notepad` |
 | **Multi-Action & Macros** | Workflow Runner & Macros | Sequential multi-command chaining (`then`, `&&`, `;`), window readiness polling, SQLite persistent named macros | `<cmd1> then <cmd2>`, `macro save <name>: ...`, `macro <name>`, `list macros` |
 | **Scheduled Cron Macros** | Time-Based Autonomous Triggers | Background ticker daemon (30s poll), cron evaluation (`daily`, `weekdays`, `every_hours`, `every_minutes`), automatic Telegram push | `schedule macro <name> <spec>`, `list schedules`, `delete schedule <id>` |
+| **Screen OCR & Vision** | Native WinRT OCR & Click Fallback | Zero-dependency Windows 11 `Windows.Media.Ocr` engine, text extraction, grounded bounding box matching, UIAutomation click fallback | `read screen`, `ocr`, `extract text in chrome`, `click <element> on <app>` |
 
 ---
 
@@ -127,7 +128,7 @@ ORION executes core workstation, input, terminal, memory, and monitoring command
 #### 3. Mouse Control & UI Vision
 | Trigger Pattern | Action |
 | :--- | :--- |
-| `click <element> on <app>` | Locate named UI control in target application via UIAutomation and click center (`click Save on notepad`) |
+| `click <element> on <app>` | Locate named UI control in target application via UIAutomation (with automatic native OCR fallback) and click center (`click Save on notepad`, `click Bookmark on chrome`) |
 | `click <element name>` | Locate named interactive control on active window and click (`click on Save button`, `click File`) |
 | `click at <x>, <y>` | Move mouse cursor to screen coordinates and click (`click at 500, 400`) |
 | `double click [at <x>, <y>]` | Double-click active position or specified coordinates (`double click at 200, 300`) |
@@ -183,6 +184,12 @@ ORION executes core workstation, input, terminal, memory, and monitoring command
 | `list schedules` / `schedules` | List active scheduled macro triggers with next run time and status (`show schedules`, `/schedules`) |
 | `delete schedule <id>` | Cancel and delete a scheduled trigger (`delete schedule 1`, `cancel schedule #2`) |
 
+#### 9. Screen OCR & Text Extraction
+| Trigger Pattern | Action |
+| :--- | :--- |
+| `read screen` / `ocr` | Perform native WinRT OCR over the full desktop screen (`extract text`) |
+| `read text in <app>` | Capture and extract text specifically within target application window (`ocr chrome`, `read screen notepad`) |
+
 ### Running Tests
 
 Execute the automated test suite:
@@ -232,14 +239,16 @@ Orion/
 │       │   ├── registry.py            # Tool registry & execution dispatcher
 │       │   ├── router.py              # Waterfall deterministic intent routing engine
 │       │   ├── screen_capture.py      # Desktop screenshot capture (Step 20)
+│       │   ├── screen_ocr.py          # Native Windows WinRT OCR extraction & coordinate finder (Step 32)
 │       │   ├── security.py            # Path sandboxing & security guards
 │       │   ├── shell_bridge.py        # Asynchronous PowerShell & CMD runner (Step 27/30.1)
 │       │   ├── system.py              # Read-only hardware & vitals inspector
-│       │   ├── ui_locator.py          # Accessibility-based UI element locator & clicker (Step 29/29.1)
+│       │   ├── ui_locator.py          # Accessibility-based UI element locator & OCR click fallback (Step 29/29.1/32)
+│       │   ├── winrt_ocr.ps1          # Zero-dependency WinRT Windows.Media.Ocr runner script (Step 32)
 │       │   └── workstation.py         # Workstation power states & session controls (Step 21/23/29.4)
 │       └── voice/
 │           └── transcriber.py         # Local offline faster-whisper speech-to-text
-├── tests/                             # Comprehensive automated test suites (Steps 1–31)
+├── tests/                             # Comprehensive automated test suites (Steps 1–32)
 ├── .env.example                       # Documented environment configuration sample
 ├── pyproject.toml                     # Project dependencies & metadata
 └── README.md
