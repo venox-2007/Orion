@@ -203,34 +203,62 @@ def type_text(text: str, target_app: str | None = None) -> bool:
         import time
 
         for char in text:
-            code = ord(char)
-            inp_down = INPUT(
-                type=INPUT_KEYBOARD,
-                union=_INPUT_UNION(
-                    ki=KEYBDINPUT(
-                        wVk=0,
-                        wScan=code,
-                        dwFlags=KEYEVENTF_UNICODE,
-                        time=0,
-                        dwExtraInfo=0,
-                    )
-                ),
-            )
-            inp_up = INPUT(
-                type=INPUT_KEYBOARD,
-                union=_INPUT_UNION(
-                    ki=KEYBDINPUT(
-                        wVk=0,
-                        wScan=code,
-                        dwFlags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
-                        time=0,
-                        dwExtraInfo=0,
-                    )
-                ),
-            )
+            if char == "\r":
+                continue
+            if char == "\n":
+                inp_down = INPUT(
+                    type=INPUT_KEYBOARD,
+                    union=_INPUT_UNION(
+                        ki=KEYBDINPUT(
+                            wVk=VK_RETURN,
+                            wScan=0,
+                            dwFlags=0,
+                            time=0,
+                            dwExtraInfo=0,
+                        )
+                    ),
+                )
+                inp_up = INPUT(
+                    type=INPUT_KEYBOARD,
+                    union=_INPUT_UNION(
+                        ki=KEYBDINPUT(
+                            wVk=VK_RETURN,
+                            wScan=0,
+                            dwFlags=KEYEVENTF_KEYUP,
+                            time=0,
+                            dwExtraInfo=0,
+                        )
+                    ),
+                )
+            else:
+                code = ord(char)
+                inp_down = INPUT(
+                    type=INPUT_KEYBOARD,
+                    union=_INPUT_UNION(
+                        ki=KEYBDINPUT(
+                            wVk=0,
+                            wScan=code,
+                            dwFlags=KEYEVENTF_UNICODE,
+                            time=0,
+                            dwExtraInfo=0,
+                        )
+                    ),
+                )
+                inp_up = INPUT(
+                    type=INPUT_KEYBOARD,
+                    union=_INPUT_UNION(
+                        ki=KEYBDINPUT(
+                            wVk=0,
+                            wScan=code,
+                            dwFlags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                            time=0,
+                            dwExtraInfo=0,
+                        )
+                    ),
+                )
             inputs = (INPUT * 2)(inp_down, inp_up)
             user32.SendInput(2, inputs, ctypes.sizeof(INPUT))
-            time.sleep(0.01)
+            time.sleep(0.008)
         return True
     except Exception as e:
         logger.warning("Failed to type text via SendInput: %s", e)

@@ -73,6 +73,71 @@ def test_type_text_mocked():
         mock_send_input2.assert_not_called()
 
 
+def test_type_text_winui3_lossless_keystrokes():
+    """Verify type_text('ORION Workflow Active') dispatches distinct, ordered wScan pairs without repetition."""
+    phrase = "ORION Workflow Active"
+    with patch("ctypes.windll.user32.SendInput") as mock_send_input, \
+         patch("time.sleep") as mock_sleep:
+        res = type_text(phrase)
+        assert res is True
+        assert mock_send_input.call_count == len(phrase)
+        assert mock_sleep.call_count == len(phrase)
+        mock_sleep.assert_called_with(0.008)
+
+        # Inspect every SendInput dispatch
+        dispatched_chars = []
+        for i, call_args in enumerate(mock_send_input.call_args_list):
+            count, inputs_array, cb_size = call_args[0]
+            assert count == 2
+            down_event = inputs_array[0].union.ki
+            up_event = inputs_array[1].union.ki
+
+            expected_char = phrase[i]
+            expected_scan = ord(expected_char)
+
+            # Keydown validation
+            assert down_event.wVk == 0
+            assert down_event.wScan == expected_scan
+            assert down_event.dwFlags == 0x0004  # KEYEVENTF_UNICODE
+            assert down_event.time == 0
+            assert down_event.dwExtraInfo == 0
+
+            # Keyup validation
+            assert up_event.wVk == 0
+            assert up_event.wScan == expected_scan
+            assert up_event.dwFlags == 0x0006  # KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+            assert up_event.time == 0
+            assert up_event.dwExtraInfo == 0
+
+            dispatched_chars.append(chr(down_event.wScan))
+
+        # Reconstructed string must match phrase identically with no character repetition
+        assert "".join(dispatched_chars) == phrase
+
+
+def test_type_text_newline_handling():
+    """Verify type_text dispatches VK_RETURN down and up on newline."""
+    with patch("ctypes.windll.user32.SendInput") as mock_send_input, \
+         patch("time.sleep"):
+        res = type_text("A\nB")
+        assert res is True
+        assert mock_send_input.call_count == 3
+
+        # Middle event is \n (VK_RETURN)
+        call_enter = mock_send_input.call_args_list[1]
+        count, inputs_array, _ = call_enter[0]
+        assert count == 2
+        down_event = inputs_array[0].union.ki
+        up_event = inputs_array[1].union.ki
+
+        assert down_event.wVk == VK_RETURN
+        assert down_event.wScan == 0
+        assert down_event.dwFlags == 0
+        assert up_event.wVk == VK_RETURN
+        assert up_event.wScan == 0
+        assert up_event.dwFlags == 0x0002  # KEYEVENTF_KEYUP
+
+
 def test_press_special_keys_mocked():
     """Verify enter, escape, and tab call keybd_event with correct VK codes."""
     from orion.tools.input_control import KEYEVENTF_KEYUP
