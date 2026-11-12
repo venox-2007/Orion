@@ -19,19 +19,20 @@ ORION is designed from the ground up to operate locally, respecting user privacy
 
 ---
 
-## Capabilities & Architecture Matrix (Steps 1–29)
+## Capabilities & Architecture Matrix (Steps 1–30)
 
 | Domain | Capability | Architectural Implementation | Key Triggers / Tools |
 | :--- | :--- | :--- | :--- |
 | **Local LLM & Planning** | Autonomous Agent Core | Local Ollama (`qwen3.5:4b`), multi-step planning & confirmation workflows | `/plan <goal>`, multi-step tools |
 | **Voice & Speech** | Offline Transcriber | `faster-whisper` (CPU int8), 60s voice note ingestion | Telegram voice notes |
 | **Personal Productivity** | Tasks & Reminders | Persistent SQLite to-do engine & lightweight background reminder scheduler | `/tasks`, `remind me in 10m to...` |
-| **Workstation & Power** | Process & Power Control | Top resource hogs inspection, guarded process termination, monitor shutoff, system sleep, web navigation | `what's eating my cpu`, `close notepad`, `turn off screen`, `sleep laptop`, `open google.com` |
+| **Workstation & Power** | Process & Power Control | Top resource hogs inspection, guarded process termination, monitor shutoff, system sleep, hibernate, shutdown/restart | `what's eating my cpu`, `close notepad`, `turn off screen`, `sleep laptop`, `hibernate`, `shutdown in 60s` |
 | **Autonomous Watchdog** | Proactive Background Daemon | Periodic battery threshold (<20%, <10%, 100%), power plug, and thermal spike debounced alerting | `watchdog status`, `pause watchdog`, `resume watchdog` |
-| **Virtual Input & Typing** | Keystrokes & Clipboard | Windows `SendInput` (Unicode), native clipboard read/write, compound key chaining, persistent active window focus | `get clipboard`, `copy <text>`, `type "hello" in notepad`, `type d and press enter` |
+| **Virtual Input & Typing** | Keystrokes & Clipboard | Windows 64-bit `SendInput` (lossless Unicode), native clipboard read/write, compound key chaining, active window autofocus | `get clipboard`, `copy <text>`, `type "hello" in notepad`, `type d and press enter` |
 | **Long-Term Memory** | Fact Store & Briefings | SQLite `orion_memories` table, slug generation, Ollama prompt injection hook, daily executive briefing | `remember that <fact>`, `show memories`, `forget memory <id>`, `morning briefing` |
-| **Remote Shell Bridge** | Non-blocking Terminal | Asynchronous PowerShell & CMD runner, dangerous command blocklist, 25s timeout & 3.5k output cap | `ps: <cmd>`, `cmd: <cmd>`, `run: <cmd>` |
-| **Vision & Coordinates** | Mouse & UI Automation | Native mouse positioning, clicks, scrolling (`user32`), and UI Automation element auto-clicker | `click at <x>, <y>`, `scroll down <n>`, `where is my mouse`, `click on Save button` |
+| **Remote Shell Bridge** | Non-blocking Terminal | Asynchronous PowerShell & CMD runner, dangerous command blocklist, 25s timeout, 3.5k output cap, workspace CWD | `ps: <cmd>`, `cmd: <cmd>`, `run: <cmd>` |
+| **Vision & Coordinates** | Mouse & UI Automation | Native mouse positioning, clicks, scrolling (`user32`), and UIAutomation accessibility element clicker | `click at <x>, <y>`, `scroll down <n>`, `where is my mouse`, `click Save on notepad` |
+| **Multi-Action & Macros** | Workflow Runner & Macros | Sequential multi-command chaining (`then`, `&&`, `;`), window readiness polling, SQLite persistent named macros | `<cmd1> then <cmd2>`, `macro save <name>: ...`, `macro <name>`, `list macros` |
 
 ---
 
@@ -115,17 +116,18 @@ ORION executes core workstation, input, terminal, memory, and monitoring command
 #### 2. Virtual Input & Keystroke Injection
 | Trigger Pattern | Action |
 | :--- | :--- |
-| `type <text> in <app>` | Bring target app to foreground and inject Unicode text (`type "Hello" in notepad`) |
-| `type <text> and press enter` | Inject text into active window and press special key |
-| `press <key>` | Tap special navigation/action key (`press enter`, `press esc`, `press tab`) |
-| `get clipboard` | Read current text on the Windows clipboard (`what's on my clipboard`) |
-| `copy <text>` | Set Windows clipboard contents (`copy: https://github.com`) |
+| `type "<text>" in <app>` | Bring target app to foreground and inject lossless 64-bit Unicode text (`type "ORION Active" in notepad`) |
+| `type <text> and press enter` | Inject text into active window and press special key (`type d and press enter`) |
+| `press <key>` | Tap special navigation/action key (`press enter`, `press esc`, `press tab`, `press space`) |
+| `get clipboard` | Read current text on the Windows clipboard (`what's on my clipboard`, `clipboard`) |
+| `copy <text>` | Set Windows clipboard contents (`copy: https://github.com`, `copy hello`) |
 
 #### 3. Mouse Control & UI Vision
 | Trigger Pattern | Action |
 | :--- | :--- |
+| `click <element> on <app>` | Locate named UI control in target application via UIAutomation and click center (`click Save on notepad`) |
+| `click <element name>` | Locate named interactive control on active window and click (`click on Save button`, `click File`) |
 | `click at <x>, <y>` | Move mouse cursor to screen coordinates and click (`click at 500, 400`) |
-| `click <element name>` | Locate named UI control via Windows accessibility and click center (`click on Save button`, `click File`) |
 | `double click [at <x>, <y>]` | Double-click active position or specified coordinates (`double click at 200, 300`) |
 | `right click [at <x>, <y>]` | Right-click active position or specified coordinates |
 | `scroll down <n>` / `scroll up <n>` | Scroll active window vertically by *n* wheel steps (`scroll down 5`) |
@@ -134,11 +136,16 @@ ORION executes core workstation, input, terminal, memory, and monitoring command
 #### 4. Workstation, Processes & Power
 | Trigger Pattern | Action |
 | :--- | :--- |
+| `put laptop to sleep` / `sleep laptop` | Safely put computer to sleep via Windows power APIs (`sleep`, `suspend system`) |
+| `turn off screen` | Immediately power down display monitors (`turn off display`, `monitor off`) |
+| `lock workstation` / `lock pc` | Lock Windows user session instantly (`lock laptop`, `lock screen`) |
+| `hibernate` | Put workstation into deep hibernation via Windows power APIs (`hibernate pc`) |
+| `shutdown in <n>s` / `shutdown laptop` | Initiate timed system shutdown with cancel window (`shutdown in 60s`) |
+| `restart laptop` | Timed reboot of computer (`restart in 30s`) |
+| `cancel shutdown` / `abort shutdown` | Abort a scheduled shutdown or restart sequence |
 | `what's eating my ram` | List top memory-consuming processes (`top ram processes`) |
 | `what's eating my cpu` | List top CPU-consuming processes (`top cpu processes`) |
-| `close <app>` | Safely terminate user application by name or alias (`close chrome`, `kill notepad`) |
-| `turn off screen` | Immediately power down display monitors (`turn off display`) |
-| `sleep laptop` | Safely put computer to sleep via Windows power APIs |
+| `close <app>` / `kill <app>` | Safely terminate user application by name or alias (`close chrome`, `kill notepad`) |
 | `open <url>` / `search <query>` | Open link in default browser or perform Google search (`search quantum computing`) |
 
 #### 5. Long-Term Memory & Executive Briefings
@@ -155,6 +162,17 @@ ORION executes core workstation, input, terminal, memory, and monitoring command
 | `watchdog status` | Check battery, load, and background monitoring status |
 | `pause watchdog` | Temporarily halt proactive background alerts |
 | `resume watchdog` | Resume proactive background monitoring alerts |
+
+#### 7. Workflows & Named Macros
+| Trigger Pattern | Action |
+| :--- | :--- |
+| `<cmd1> then <cmd2> [then <cmd3>]` | Sequentially execute chained commands with window-polling and safety halts (`open notepad then type "Hello" in notepad then where is my mouse`) |
+| `macro save <name>: <steps>` | Persist a reusable named macro into SQLite (`macro save dev: open code then ps: git status`) |
+| `save macro <name>: <steps>` | Alias for saving a persistent macro (`save macro morning: open chrome then morning briefing`) |
+| `macro <name>` / `run macro <name>` | Execute saved macro steps in sequence (`macro dev`, `execute macro lockdown`) |
+| `list macros` / `show macros` | List all saved persistent macros with step previews (`my macros`) |
+| `macro info <name>` | Inspect full sequential steps and metadata of a macro (`inspect macro dev`) |
+| `delete macro <name>` | Remove a macro from persistent storage (`delete macro dev`) |
 
 ### Running Tests
 
@@ -178,12 +196,14 @@ Orion/
 │       ├── core/
 │       │   ├── briefing.py            # Executive daily briefing aggregation engine (Step 26)
 │       │   ├── execution_engine.py    # Multi-step action plan validation & execution
+│       │   ├── macro_store.py         # SQLite persistent named macro definitions (Step 30)
 │       │   ├── memory_store.py        # SQLite persistent long-term memory store (Step 26)
 │       │   ├── models.py              # Core data models and schemas
 │       │   ├── planner.py             # Action plan generator
 │       │   ├── reminders.py           # Personal reminder management & scheduler (Step 17)
 │       │   ├── tasks.py               # Personal to-do & task management engine (Step 19)
-│       │   └── watchdog.py            # Autonomous background system monitoring daemon (Step 24)
+│       │   ├── watchdog.py            # Autonomous background system monitoring daemon (Step 24)
+│       │   └── workflow_runner.py     # Sequential multi-action workflow sequencer (Step 30)
 │       ├── integrations/
 │       │   ├── formatter.py           # Telegram Markdown/HTML converter & sanitizer
 │       │   ├── ollama.py              # Local Ollama client & prompt generator
@@ -196,20 +216,20 @@ Orion/
 │       │   ├── file_bridge.py         # Telegram document upload & download bridge (Step 22)
 │       │   ├── filesystem.py          # Sandboxed directory reader & searcher
 │       │   ├── filesystem_actions.py  # Sandboxed single file mutations with confirmation
-│       │   ├── input_control.py       # Virtual keystroke injection & remote clipboard (Step 25)
+│       │   ├── input_control.py       # Virtual keystroke injection & remote clipboard (Step 25/30.2/30.3)
 │       │   ├── mouse_control.py       # Remote cursor positioning, clicks, and scrolling (Step 28)
 │       │   ├── process_manager.py     # Process monitoring & safe app termination (Step 23)
 │       │   ├── registry.py            # Tool registry & execution dispatcher
 │       │   ├── router.py              # Waterfall deterministic intent routing engine
 │       │   ├── screen_capture.py      # Desktop screenshot capture (Step 20)
 │       │   ├── security.py            # Path sandboxing & security guards
-│       │   ├── shell_bridge.py        # Asynchronous PowerShell & CMD runner (Step 27)
+│       │   ├── shell_bridge.py        # Asynchronous PowerShell & CMD runner (Step 27/30.1)
 │       │   ├── system.py              # Read-only hardware & vitals inspector
-│       │   ├── ui_locator.py          # Accessibility-based UI element locator & clicker (Step 29)
-│       │   └── workstation.py         # Workstation power states & web navigation (Step 21/23)
+│       │   ├── ui_locator.py          # Accessibility-based UI element locator & clicker (Step 29/29.1)
+│       │   └── workstation.py         # Workstation power states & session controls (Step 21/23/29.4)
 │       └── voice/
 │           └── transcriber.py         # Local offline faster-whisper speech-to-text
-├── tests/                             # Comprehensive automated test suites (Steps 1–29)
+├── tests/                             # Comprehensive automated test suites (Steps 1–30)
 ├── .env.example                       # Documented environment configuration sample
 ├── pyproject.toml                     # Project dependencies & metadata
 └── README.md
