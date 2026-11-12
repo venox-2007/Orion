@@ -19,7 +19,7 @@ ORION is designed from the ground up to operate locally, respecting user privacy
 
 ---
 
-## Capabilities & Architecture Matrix (Steps 1–30)
+## Capabilities & Architecture Matrix (Steps 1–31)
 
 | Domain | Capability | Architectural Implementation | Key Triggers / Tools |
 | :--- | :--- | :--- | :--- |
@@ -33,6 +33,7 @@ ORION is designed from the ground up to operate locally, respecting user privacy
 | **Remote Shell Bridge** | Non-blocking Terminal | Asynchronous PowerShell & CMD runner, dangerous command blocklist, 25s timeout, 3.5k output cap, workspace CWD | `ps: <cmd>`, `cmd: <cmd>`, `run: <cmd>` |
 | **Vision & Coordinates** | Mouse & UI Automation | Native mouse positioning, clicks, scrolling (`user32`), and UIAutomation accessibility element clicker | `click at <x>, <y>`, `scroll down <n>`, `where is my mouse`, `click Save on notepad` |
 | **Multi-Action & Macros** | Workflow Runner & Macros | Sequential multi-command chaining (`then`, `&&`, `;`), window readiness polling, SQLite persistent named macros | `<cmd1> then <cmd2>`, `macro save <name>: ...`, `macro <name>`, `list macros` |
+| **Scheduled Cron Macros** | Time-Based Autonomous Triggers | Background ticker daemon (30s poll), cron evaluation (`daily`, `weekdays`, `every_hours`, `every_minutes`), automatic Telegram push | `schedule macro <name> <spec>`, `list schedules`, `delete schedule <id>` |
 
 ---
 
@@ -98,6 +99,7 @@ This launches the FastAPI service (accessible at `http://127.0.0.1:8000/health`)
 - `/apps`: View available approved Windows applications.
 - `/windows`: Inspect currently open approved desktop windows.
 - `/active`: Identify the active foreground application.
+- `/schedules`: View active scheduled macro triggers.
 - `/status`: View running and pending task workflows.
 - `/history`: Inspect recent execution history.
 - `/cancel`: Cancel pending execution proposals.
@@ -174,6 +176,13 @@ ORION executes core workstation, input, terminal, memory, and monitoring command
 | `macro info <name>` | Inspect full sequential steps and metadata of a macro (`inspect macro dev`) |
 | `delete macro <name>` | Remove a macro from persistent storage (`delete macro dev`) |
 
+#### 8. Scheduled Cron Macros
+| Trigger Pattern | Action |
+| :--- | :--- |
+| `schedule macro <name> <spec>` | Schedule saved macro for recurring autonomous execution (`schedule macro morning daily at 08:30`, `schedule macro health every 2 hours`) |
+| `list schedules` / `schedules` | List active scheduled macro triggers with next run time and status (`show schedules`, `/schedules`) |
+| `delete schedule <id>` | Cancel and delete a scheduled trigger (`delete schedule 1`, `cancel schedule #2`) |
+
 ### Running Tests
 
 Execute the automated test suite:
@@ -196,6 +205,7 @@ Orion/
 │       ├── core/
 │       │   ├── briefing.py            # Executive daily briefing aggregation engine (Step 26)
 │       │   ├── execution_engine.py    # Multi-step action plan validation & execution
+│       │   ├── macro_scheduler.py     # SQLite persistent cron scheduler & background ticker (Step 31)
 │       │   ├── macro_store.py         # SQLite persistent named macro definitions (Step 30)
 │       │   ├── memory_store.py        # SQLite persistent long-term memory store (Step 26)
 │       │   ├── models.py              # Core data models and schemas
@@ -229,7 +239,7 @@ Orion/
 │       │   └── workstation.py         # Workstation power states & session controls (Step 21/23/29.4)
 │       └── voice/
 │           └── transcriber.py         # Local offline faster-whisper speech-to-text
-├── tests/                             # Comprehensive automated test suites (Steps 1–30)
+├── tests/                             # Comprehensive automated test suites (Steps 1–31)
 ├── .env.example                       # Documented environment configuration sample
 ├── pyproject.toml                     # Project dependencies & metadata
 └── README.md

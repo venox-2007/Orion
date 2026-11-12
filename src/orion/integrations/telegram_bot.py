@@ -372,6 +372,19 @@ def create_telegram_app(
             msg = f"Reminder {rid} was not found or is already cancelled."
         await send_formatted_message(update.effective_message, msg)
 
+    async def schedules_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        from orion.core.macro_scheduler import get_macro_scheduler
+
+        scheduler = get_macro_scheduler()
+        schedules = scheduler.list_schedules()
+        reply = scheduler.format_schedule_list(schedules)
+        await send_formatted_message(update.effective_message, reply)
+
     async def reset_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not is_authorized_owner(update, owner_id):
             if update.effective_message:
@@ -1699,6 +1712,23 @@ def create_telegram_app(
                 text=clean_markdown_to_plain(reminder_text),
             )
 
+    async def deliver_scheduled_macro_report(report_text: str) -> None:
+        try:
+            await app.bot.send_message(
+                chat_id=owner_id,
+                text=markdown_to_telegram_html(report_text),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as html_err:
+            logger.warning(
+                "HTML formatting failed for scheduled macro delivery, falling back to plain text: %s",
+                html_err,
+            )
+            await app.bot.send_message(
+                chat_id=owner_id,
+                text=clean_markdown_to_plain(report_text),
+            )
+
     from orion.core.reminders import ReminderScheduler
 
     reminder_scheduler = scheduler or ReminderScheduler(
@@ -1719,6 +1749,24 @@ def create_telegram_app(
             wd_task = asyncio.create_task(wd.run_loop())
             application.bot_data["watchdog_task"] = wd_task
 
+        macro_sched = application.bot_data.get("macro_scheduler")
+        macro_store = application.bot_data.get("macro_store")
+        if macro_sched and macro_store:
+            from orion.core.macro_scheduler import run_macro_scheduler_loop
+
+            stop_evt = asyncio.Event()
+            application.bot_data["macro_scheduler_stop"] = stop_evt
+            macro_task = asyncio.create_task(
+                run_macro_scheduler_loop(
+                    scheduler=macro_sched,
+                    macro_store=macro_store,
+                    deliver_fn=deliver_scheduled_macro_report,
+                    poll_interval_sec=30.0,
+                    stop_event=stop_evt,
+                )
+            )
+            application.bot_data["macro_scheduler_task"] = macro_task
+
     async def _post_shutdown(application: Application) -> None:
         sched = application.bot_data.get("reminder_scheduler")
         if sched:
@@ -1734,6 +1782,17 @@ def create_telegram_app(
             except asyncio.CancelledError:
                 pass
 
+        macro_stop: asyncio.Event | None = application.bot_data.get("macro_scheduler_stop")
+        if macro_stop:
+            macro_stop.set()
+        macro_task: asyncio.Task | None = application.bot_data.get("macro_scheduler_task")
+        if macro_task and not macro_task.done():
+            macro_task.cancel()
+            try:
+                await macro_task
+            except asyncio.CancelledError:
+                pass
+
     app = (
         ApplicationBuilder()
         .token(token)
@@ -1743,6 +1802,12 @@ def create_telegram_app(
     )
     app.bot_data["reminder_scheduler"] = reminder_scheduler
     app.bot_data["watchdog"] = watchdog_engine
+
+    from orion.core.macro_scheduler import get_macro_scheduler
+    from orion.core.macro_store import get_macro_store
+
+    app.bot_data["macro_store"] = get_macro_store()
+    app.bot_data["macro_scheduler"] = get_macro_scheduler()
 
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("reset", reset_handler))
@@ -1758,6 +1823,7 @@ def create_telegram_app(
     app.add_handler(CommandHandler("active", active_handler))
     app.add_handler(CommandHandler("reminders", reminders_handler))
     app.add_handler(CommandHandler("cancel_reminder", cancel_reminder_handler))
+    app.add_handler(CommandHandler(["schedules", "macro_schedules"], schedules_handler))
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CallbackQueryHandler(confirmation_callback_handler))
     app.add_handler(MessageHandler(filters.VOICE, voice_handler))

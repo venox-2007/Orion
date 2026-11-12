@@ -1221,7 +1221,7 @@ async def check_deterministic_macro_and_workflow_query(
     clean_text: str,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Deterministically check for macro management and named macro execution (Step 30)."""
+    """Deterministically check for macro management, scheduling, and execution (Steps 30 & 31)."""
     clean = clean_text.strip()
     if not clean:
         return None
@@ -1233,7 +1233,73 @@ async def check_deterministic_macro_and_workflow_query(
 
     macro_store = get_macro_store()
 
-    # 1. Save Macro: "macro save <name>: <cmd1> then <cmd2>" or "create macro <name>: ..."
+    # 1. Schedule Macro (Step 31): "schedule macro <name> <spec>"
+    sched_pat = r"^schedule\s+macro\s+([a-zA-Z0-9_\-]+)\s+(.+)$"
+    m_sched = re.match(sched_pat, clean, re.IGNORECASE) or re.match(sched_pat, clean_no_punct, re.IGNORECASE)
+    if m_sched:
+        name = m_sched.group(1).strip().lower()
+        spec = m_sched.group(2).strip()
+
+        from orion.core.macro_scheduler import get_macro_scheduler, human_readable_spec
+
+        scheduler = get_macro_scheduler()
+        try:
+            sched = scheduler.add_schedule(name, spec)
+        except ValueError as err:
+            err_msg = str(err)
+            if "does not exist" in err_msg:
+                return {
+                    "handled": True,
+                    "reply": f"⚠️ Macro '*{name}*' does not exist. Save it first with `macro save {name}: ...`.",
+                }
+            return {
+                "handled": True,
+                "reply": f"⚠️ Invalid schedule format: {err_msg}",
+            }
+        except Exception as err:
+            return {"handled": True, "reply": f"⚠️ Error scheduling macro: {err}"}
+
+        human_desc = human_readable_spec(sched["schedule_type"], sched["time_of_day"], sched["interval_value"])
+        try:
+            dt = datetime.fromisoformat(sched["next_run_at"])
+            next_str = dt.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            next_str = sched["next_run_at"]
+
+        return {
+            "handled": True,
+            "reply": (
+                f"⏰ *Macro '{name}' scheduled:*\n"
+                f"• Schedule: {human_desc}\n"
+                f"• Next run: `{next_str}`\n"
+                f"• ID: `#{sched['id']}`"
+            ),
+        }
+
+    # 2. List Schedules (Step 31): "list schedules", "show schedules", "macro schedules", "schedules"
+    list_sched_pat = r"^(?:list\s+schedules|show\s+schedules|macro\s+schedules|schedules)$"
+    if re.match(list_sched_pat, clean, re.IGNORECASE) or re.match(list_sched_pat, clean_no_punct, re.IGNORECASE):
+        from orion.core.macro_scheduler import get_macro_scheduler
+
+        scheduler = get_macro_scheduler()
+        schedules = scheduler.list_schedules()
+        reply = scheduler.format_schedule_list(schedules)
+        return {"handled": True, "reply": reply}
+
+    # 3. Delete / Cancel Schedule (Step 31): "delete schedule <id>", "cancel schedule <id>", "remove schedule <id>"
+    del_sched_pat = r"^(?:delete\s+schedule|cancel\s+schedule|remove\s+schedule)\s+#?(\d+)$"
+    m_del_sched = re.match(del_sched_pat, clean, re.IGNORECASE) or re.match(del_sched_pat, clean_no_punct, re.IGNORECASE)
+    if m_del_sched:
+        sched_id = int(m_del_sched.group(1))
+        from orion.core.macro_scheduler import get_macro_scheduler
+
+        scheduler = get_macro_scheduler()
+        deleted = scheduler.delete_schedule(sched_id)
+        if deleted:
+            return {"handled": True, "reply": f"🗑️ *Scheduled trigger #{sched_id} deleted.*"}
+        return {"handled": True, "reply": f"⚠️ Schedule trigger `#{sched_id}` not found."}
+
+    # 4. Save Macro: "macro save <name>: <cmd1> then <cmd2>" or "create macro <name>: ..."
     save_pat = r"^(?:macro\s+save|create\s+macro)\s+([a-zA-Z0-9_\-]+):\s*(.+)$"
     m_save = re.match(save_pat, clean, re.IGNORECASE) or re.match(save_pat, clean_no_punct, re.IGNORECASE)
     if m_save:
@@ -1247,14 +1313,14 @@ async def check_deterministic_macro_and_workflow_query(
         step_word = "step" if len(steps) == 1 else "steps"
         return {"handled": True, "reply": f"⚡ *Macro '{name}' saved* with {len(steps)} {step_word}."}
 
-    # 2. List Macros: "list macros", "show macros", "macros"
+    # 5. List Macros: "list macros", "show macros", "macros"
     list_pat = r"^(?:list\s+macros|show\s+macros|macros)$"
     if re.match(list_pat, clean, re.IGNORECASE) or re.match(list_pat, clean_no_punct, re.IGNORECASE):
         macros = macro_store.list_macros()
         reply = macro_store.format_macro_list(macros)
         return {"handled": True, "reply": reply}
 
-    # 3. Delete Macro: "delete macro <name>", "forget macro <name>"
+    # 6. Delete Macro: "delete macro <name>", "forget macro <name>"
     del_pat = r"^(?:delete\s+macro|forget\s+macro)\s+([a-zA-Z0-9_\-]+)$"
     m_del = re.match(del_pat, clean, re.IGNORECASE) or re.match(del_pat, clean_no_punct, re.IGNORECASE)
     if m_del:
@@ -1264,12 +1330,12 @@ async def check_deterministic_macro_and_workflow_query(
             return {"handled": True, "reply": f"🗑️ *Macro '{name}' deleted.*"}
         return {"handled": True, "reply": f"⚠️ Macro '*{name}*' not found."}
 
-    # 4. Run Named Macro: "run macro <name>", "execute macro <name>", "macro run <name>", "macro <name>"
+    # 7. Run Named Macro: "run macro <name>", "execute macro <name>", "macro run <name>", "macro <name>"
     run_pat = r"^(?:run\s+macro|execute\s+macro|macro\s+run|macro)\s+([a-zA-Z0-9_\-]+)$"
     m_run = re.match(run_pat, clean, re.IGNORECASE) or re.match(run_pat, clean_no_punct, re.IGNORECASE)
     if m_run:
         name = m_run.group(1).strip().lower()
-        if name in ("save", "list", "show", "delete", "forget", "help"):
+        if name in ("save", "list", "show", "delete", "forget", "help", "schedules", "schedule"):
             return None
 
         macro = macro_store.get_macro(name)
