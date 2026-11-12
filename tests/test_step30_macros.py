@@ -225,3 +225,62 @@ async def test_router_adhoc_workflow_chaining():
         assert args[0] == ["open notepad", "type hello", "screenshot"]
         assert "Workflow Completed" in res["reply"]
         assert re.search(r"</?(?:b|i|s|code|pre)>", res["reply"]) is None
+
+
+@pytest.mark.asyncio
+async def test_workflow_app_launch_and_window_polling():
+    """Verify workflow executes app launch, polls window readiness, and executes subsequent step."""
+    with patch("orion.tools.app_launcher.launch_application", return_value={"success": True, "display_name": "Notepad", "app_id": "notepad"}) as mock_launch, \
+         patch("orion.tools.input_control.focus_window_by_name", return_value=True) as mock_focus, \
+         patch("orion.tools.input_control.type_text", return_value=True) as mock_type:
+
+        res = await route_and_execute_tool('open notepad then type "hello" in notepad')
+        assert res is not None
+        assert res.get("handled") is True
+        assert res.get("is_workflow") is True
+        assert res.get("success") is True
+        assert res.get("completed") == 2
+
+        mock_launch.assert_called_once_with("notepad")
+        assert mock_focus.called
+        assert mock_type.called
+        assert "Workflow Completed (2/2 steps)" in res["reply"]
+        assert re.search(r"</?(?:b|i|s|code|pre)>", res["reply"]) is None
+
+
+@pytest.mark.asyncio
+async def test_shell_bridge_default_cwd_workspace():
+    """Verify shell execution defaults cwd to os.getcwd()."""
+    import os
+    from orion.tools.shell_bridge import execute_shell_command
+
+    with patch("asyncio.create_subprocess_exec") as mock_exec:
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate.return_value = (b"branch main\n", b"")
+        mock_exec.return_value = mock_proc
+
+        res = await execute_shell_command("git status", shell_type="powershell")
+        assert res["exit_code"] == 0
+
+        # Verify cwd passed to asyncio.create_subprocess_exec was os.getcwd()
+        called_cwd = mock_exec.call_args[1].get("cwd")
+        assert called_cwd == str(Path(os.getcwd()).resolve())
+
+
+@pytest.mark.asyncio
+async def test_workflow_halts_on_subreply_warning():
+    """Verify that any step returning a warning/error marker halts subsequent steps."""
+    async def mock_router(step, context=None):
+        if step == "step1":
+            return {"handled": True, "reply": "⚠️ Error: Application not available."}
+        return {"handled": True, "reply": "Done."}
+
+    res = await execute_workflow(["step1", "step2"], mock_router, delay_sec=0.01)
+    assert res["handled"] is True
+    assert res["success"] is False
+    assert res["completed"] == 0
+    assert len(res["step_results"]) == 1
+    assert "Workflow Stopped (0/2 steps)" in res["reply"]
+    assert "1. ❌ *step1*" in res["reply"]
+

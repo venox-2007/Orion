@@ -1,9 +1,10 @@
-"""Asynchronous terminal execution engine and shell command bridge for ORION (Step 27)."""
+"""Asynchronous terminal execution engine and shell command bridge for ORION (Step 27 & 30.1)."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 import re
 import time
@@ -65,8 +66,18 @@ async def execute_shell_command(
         cmd_args = ["cmd.exe", "/c", clean_command]
         resolved_shell = "cmd"
 
-    # 3. Resolve working directory
-    resolved_cwd = str(Path(cwd).expanduser().resolve()) if cwd else str(Path.home())
+    # 3. Resolve working directory (defaults to current working directory, fallback to home)
+    if cwd:
+        resolved_cwd = str(Path(cwd).expanduser().resolve())
+    else:
+        try:
+            cwd_str = os.getcwd()
+            if Path(cwd_str).is_dir():
+                resolved_cwd = str(Path(cwd_str).resolve())
+            else:
+                resolved_cwd = str(Path.home())
+        except Exception:
+            resolved_cwd = str(Path.home())
 
     start_time = time.perf_counter()
 

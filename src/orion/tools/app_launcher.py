@@ -718,15 +718,22 @@ def launch_application(app_id: str) -> dict[str, Any]:
             # Fixed argument vector only. No model-generated flags.
             cmd = [str(canonical_path)] + list(app.fixed_args)
             logger.info("Launching Win32 application %s via %s", app.display_name, cmd)
-            subprocess.Popen(
-                cmd,
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-                creationflags=creationflags,
-            )
+            try:
+                subprocess.Popen(
+                    cmd,
+                    shell=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                    creationflags=creationflags,
+                )
+            except Exception as popen_err:
+                logger.debug("Popen failed, attempting os.startfile fallback: %s", popen_err)
+                if sys.platform == "win32" and hasattr(os, "startfile"):
+                    os.startfile(str(canonical_path))
+                else:
+                    raise
             return {
                 "success": True,
                 "app_id": app_id,

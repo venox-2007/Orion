@@ -54,6 +54,16 @@ async def execute_workflow(
         if idx > 1 and delay_sec > 0:
             await asyncio.sleep(delay_sec)
 
+        # Check if step is an application launch command
+        app_target = None
+        m_app = re.match(r"^(?:open|launch|start|run)\s+(.+)$", step_cmd, re.IGNORECASE)
+        if m_app:
+            raw_app = m_app.group(1).strip()
+            cand_app = re.sub(r"^(?:the\s+|my\s+)", "", raw_app, flags=re.IGNORECASE).strip()
+            cand_app = re.sub(r"(?i)\s+(?:app|application|program)[\.!\?]?$", "", cand_app).strip(" .!?\"'")
+            if not (cand_app.startswith(("http://", "https://")) or ":" in cand_app or cand_app in ("watchdog",)):
+                app_target = cand_app
+
         try:
             res = await router_fn(step_cmd, context=wf_context)
             if res is None:
@@ -62,6 +72,24 @@ async def execute_workflow(
             elif not res.get("handled"):
                 success = False
                 sub_reply = res.get("reply") or "Command not handled."
+            elif res.get("is_proposal"):
+                # Execute action proposal in automated workflow
+                action_type = res.get("action_type")
+                args = res.get("arguments", {})
+                if action_type == "launch_application" and "app_id" in args:
+                    from orion.tools.app_launcher import launch_application
+
+                    exec_res = launch_application(args["app_id"])
+                    if exec_res.get("success"):
+                        success = True
+                        disp = exec_res.get("display_name", args["app_id"])
+                        sub_reply = f"🚀 Launch requested for {disp}."
+                    else:
+                        success = False
+                        sub_reply = f"⚠️ {exec_res.get('error', 'Failed to launch application.')}"
+                else:
+                    success = False
+                    sub_reply = f"⚠️ Action proposal requires confirmation: {action_type}"
             else:
                 sub_reply = res.get("reply") or "Executed successfully."
                 # Check for explicit failure markers
@@ -69,6 +97,19 @@ async def execute_workflow(
                     success = False
                 else:
                     success = True
+
+            # If application launch succeeded, poll for window readiness
+            if success and app_target:
+                from orion.tools import input_control
+
+                poll_interval = 0.5 if delay_sec >= 0.5 else max(0.01, delay_sec)
+                for _ in range(6):
+                    await asyncio.sleep(poll_interval)
+                    try:
+                        if input_control.focus_window_by_name(app_target):
+                            break
+                    except Exception as poll_err:
+                        logger.debug("Window focus polling error for '%s': %s", app_target, poll_err)
 
         except Exception as e:
             logger.warning("Workflow step %d ('%s') raised exception: %s", idx, step_cmd, e)

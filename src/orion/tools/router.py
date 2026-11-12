@@ -2468,6 +2468,25 @@ def check_deterministic_app_launch(
                 "reply": f"Cannot launch {app.display_name}: Application is not currently installed or available on this system.",
             }
 
+        # If executing inside an autonomous multi-step workflow, execute immediately without proposal gate
+        if context and context.get("_in_workflow"):
+            from orion.tools.app_launcher import launch_application
+
+            exec_res = launch_application(app_id)
+            if exec_res.get("success"):
+                return {
+                    "handled": True,
+                    "reply": f"🚀 Launch requested for {app.display_name}.",
+                    "app_id": app_id,
+                    "display_name": app.display_name,
+                }
+            err = exec_res.get("error") or f"Failed to launch {app.display_name}."
+            return {
+                "handled": True,
+                "reply": f"⚠️ {err}",
+                "app_id": app_id,
+            }
+
         clean_args = {"app_id": app_id}
         proposal_text = format_action_proposal("launch_application", clean_args)
         return {
