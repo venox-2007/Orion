@@ -48,13 +48,17 @@ CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
 
 
+# Pointer-sized integer for dwExtraInfo across 32-bit and 64-bit Windows
+ULONG_PTR = ctypes.c_size_t
+
+
 class KEYBDINPUT(ctypes.Structure):
     _fields_ = [
         ("wVk", wintypes.WORD),
         ("wScan", wintypes.WORD),
         ("dwFlags", wintypes.DWORD),
         ("time", wintypes.DWORD),
-        ("dwExtraInfo", ctypes.c_size_t),
+        ("dwExtraInfo", ULONG_PTR),
     ]
 
 
@@ -73,7 +77,7 @@ class MOUSEINPUT(ctypes.Structure):
         ("mouseData", wintypes.DWORD),
         ("dwFlags", wintypes.DWORD),
         ("time", wintypes.DWORD),
-        ("dwExtraInfo", ctypes.c_size_t),
+        ("dwExtraInfo", ULONG_PTR),
     ]
 
 
@@ -90,6 +94,11 @@ class INPUT(ctypes.Structure):
         ("type", wintypes.DWORD),
         ("union", _INPUT_UNION),
     ]
+
+
+# Ensure 64-bit Windows struct alignment matches winuser.h (40 bytes)
+if ctypes.sizeof(ctypes.c_void_p) == 8:
+    assert ctypes.sizeof(INPUT) == 40, f"Expected INPUT to be 40 bytes on 64-bit Windows, got {ctypes.sizeof(INPUT)}"
 
 
 def _setup_ctypes_signatures() -> tuple[Any, Any]:

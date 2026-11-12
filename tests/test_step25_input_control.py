@@ -73,6 +73,19 @@ def test_type_text_mocked():
         mock_send_input2.assert_not_called()
 
 
+def test_input_struct_size_and_alignment():
+    """Verify ctypes.sizeof(INPUT) == 40 on 64-bit Windows with exact field alignment."""
+    import ctypes
+    from orion.tools.input_control import INPUT, KEYBDINPUT, MOUSEINPUT, _INPUT_UNION
+
+    if ctypes.sizeof(ctypes.c_void_p) == 8:
+        assert ctypes.sizeof(INPUT) == 40
+        assert ctypes.sizeof(_INPUT_UNION) == 32
+        assert ctypes.sizeof(MOUSEINPUT) == 32
+        assert ctypes.sizeof(KEYBDINPUT) == 24
+        assert INPUT.union.offset == 8
+
+
 def test_type_text_winui3_lossless_keystrokes():
     """Verify type_text('ORION Workflow Active') dispatches distinct, ordered wScan pairs without repetition."""
     phrase = "ORION Workflow Active"
@@ -399,4 +412,16 @@ async def test_persistent_window_targeting():
         assert "🔘 Pressed *ENTER* in *notepad*." in res3.get("reply", "")
         mock_focus.assert_called_once_with("notepad")
         mock_press.assert_called_once_with("enter")
+
+
+@pytest.mark.asyncio
+async def test_type_text_extraction_fidelity():
+    """Verify check_deterministic_input_query faithfully extracts quoted strings and targets."""
+    with patch("orion.tools.input_control.focus_window_by_name", return_value=True) as mock_focus, \
+         patch("orion.tools.input_control.type_text", return_value=True) as mock_type:
+        res = await route_and_execute_tool('type "ORION Workflow Active" in notepad')
+        assert res is not None and res.get("handled") is True
+        assert "⌨️ Typed text into *notepad*." in res.get("reply", "")
+        mock_focus.assert_called_once_with("notepad")
+        mock_type.assert_called_once_with("ORION Workflow Active")
 
