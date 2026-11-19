@@ -50,7 +50,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     logger.error("Error during partial startup cleanup: %s", cleanup_err)
                 telegram_app = None
 
+    # Wire live two-way voice loop listener (Step 34)
+    voice_manager = None
+    if settings.voice_autostart:
+        try:
+            from orion.voice.stt import get_voice_loop_manager
+
+            voice_manager = get_voice_loop_manager()
+            await voice_manager.start()
+            logger.info("VoiceLoopManager autostarted.")
+        except Exception as v_err:
+            logger.warning("Failed to autostart VoiceLoopManager: %s", v_err)
+
     yield
+
+    if voice_manager:
+        try:
+            await voice_manager.stop()
+        except Exception as v_err:
+            logger.debug("Error stopping VoiceLoopManager: %s", v_err)
 
     if telegram_app:
         try:

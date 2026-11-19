@@ -385,6 +385,35 @@ def create_telegram_app(
         reply = scheduler.format_schedule_list(schedules)
         await send_formatted_message(update.effective_message, reply)
 
+    async def voice_mode_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not is_authorized_owner(update, owner_id):
+            if update.effective_message:
+                await update.effective_message.reply_text(UNAUTHORIZED_MESSAGE)
+            return
+
+        from orion.voice.stt import get_voice_loop_manager
+
+        mgr = get_voice_loop_manager()
+        args = [a.lower() for a in (context.args or [])]
+        if "start" in args or "on" in args or "enable" in args:
+            was = mgr.is_running
+            await mgr.start()
+            msg = "🎙️ *Voice Mode:* Already active." if was else "🎙️ *Voice Mode Activated:* Listening for wake-word *'Orion'*."
+        elif "stop" in args or "off" in args or "disable" in args:
+            await mgr.stop()
+            msg = "🔇 *Voice Mode Deactivated:* Microphone listener stopped."
+        else:
+            state = "Active" if mgr.is_running else "Inactive"
+            msg = (
+                f"🎙️ *Voice Mode Status:*\n"
+                f"• Listener: *{state}*\n"
+                f"• Wake Word: *'{mgr.wake_word}'*\n"
+                f"Send `/voice start` to enable or `/voice stop` to disable."
+            )
+
+        if update.effective_message:
+            await send_formatted_message(update.effective_message, msg)
+
     async def reset_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not is_authorized_owner(update, owner_id):
             if update.effective_message:
@@ -1832,6 +1861,7 @@ def create_telegram_app(
     app.add_handler(CommandHandler("reminders", reminders_handler))
     app.add_handler(CommandHandler("cancel_reminder", cancel_reminder_handler))
     app.add_handler(CommandHandler(["schedules", "macro_schedules"], schedules_handler))
+    app.add_handler(CommandHandler(["voice", "voicemode"], voice_mode_command_handler))
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CallbackQueryHandler(confirmation_callback_handler))
     app.add_handler(MessageHandler(filters.VOICE, voice_handler))

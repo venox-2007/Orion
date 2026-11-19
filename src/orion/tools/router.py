@@ -1619,10 +1619,12 @@ def check_deterministic_process_and_power_query(
             "watchdog",
             "watcher",
             "watchers",
+            "voice",
+            "speaking",
         }
         if (
             clean_target in non_app_words
-            or clean_target.startswith(("task ", "reminder ", "watcher ", "watch_"))
+            or clean_target.startswith(("task ", "reminder ", "watcher ", "watch_", "voice "))
         ):
             return None
 
@@ -2046,6 +2048,67 @@ async def check_deterministic_watcher_query(
         )
         reply = f"👁️ *Watching screen for '{raw_query}'* (ID: `{watch_id}`, timeout: 15m). I'll ping you when it appears."
         return {"handled": True, "reply": reply}
+
+    return None
+
+
+async def check_deterministic_voice_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check for voice output, TTS controls, and wake-word voice listener (Step 34)."""
+    clean = clean_text.strip()
+    clean_lower = clean.lower().rstrip(".?! ")
+
+    from orion.voice import tts
+    from orion.voice.stt import get_voice_loop_manager
+
+    # 1. Say / Speak / Announce out loud: say "Hello", speak "System ready", announce "Meeting starts"
+    say_pat = r"^(?:say|speak|announce)\s+[\"']?(.+?)[\"']?$"
+    m_say = re.match(say_pat, clean, re.IGNORECASE)
+    if m_say:
+        phrase = m_say.group(1).strip().strip("'\"")
+        await tts.speak_text(phrase)
+        return {"handled": True, "reply": f'🗣️ Speaking: *"{phrase}"*'}
+
+    # 2. Voice Listener Control: start/enable voice mode
+    start_pat = r"^(?:start|enable)\s+voice(?:\s+mode|\s+listener)?$"
+    if re.match(start_pat, clean_lower):
+        mgr = get_voice_loop_manager()
+        was_running = mgr.is_running
+        await mgr.start()
+        if was_running:
+            reply = "🎙️ *Voice Mode:* Already active and listening for wake-word *'Orion'* on microphone."
+        else:
+            reply = "🎙️ *Voice Mode Activated:* Listening for wake-word *'Orion'* on microphone."
+        return {"handled": True, "reply": reply}
+
+    # 3. Voice Listener Control: stop/disable voice mode
+    stop_pat = r"^(?:stop|disable)\s+voice(?:\s+mode|\s+listener)?$"
+    if re.match(stop_pat, clean_lower):
+        mgr = get_voice_loop_manager()
+        await mgr.stop()
+        return {"handled": True, "reply": "🔇 *Voice Mode Deactivated:* Microphone listener stopped."}
+
+    # 4. Voice Status: voice status, voice mode
+    status_pat = r"^(?:voice\s+status|voice\s+mode)$"
+    if re.match(status_pat, clean_lower):
+        mgr = get_voice_loop_manager()
+        state = "Active" if mgr.is_running else "Inactive"
+        tts_state = "Speaking" if tts.is_speaking() else "Ready"
+        reply = (
+            f"🎙️ *Voice Mode Status:*\n"
+            f"• Listener: *{state}*\n"
+            f"• Wake Word: *'{mgr.wake_word}'*\n"
+            f"• TTS Engine: *{tts_state}*"
+        )
+        return {"handled": True, "reply": reply}
+
+    # 5. Mute Voice / Stop Speaking: mute voice, stop speaking, silence, shut up
+    mute_pat = r"^(?:mute\s+voice|stop\s+speaking|shut\s+up|silence)$"
+    if re.match(mute_pat, clean_lower):
+        tts.stop_speaking()
+        return {"handled": True, "reply": "🔇 *Voice Speech Halted.*"}
 
     return None
 
@@ -2516,6 +2579,10 @@ def check_deterministic_app_launch(
     if raw_target.lower() in ("watchdog", "autonomous watchdog"):
         return None
 
+    # Check if target is a voice mode command (Step 34): let voice router handle it
+    if raw_target.lower() in ("voice", "voice mode", "voice listener"):
+        return None
+
     if raw_target.lower() in PRONOUN_APP_TARGETS:
         resolved_app, reason = resolve_target_app_from_context(raw_target, context)
         if resolved_app:
@@ -2916,6 +2983,11 @@ async def route_and_execute_tool(
     watcher_res = await check_deterministic_watcher_query(clean_text, context=context)
     if watcher_res:
         return watcher_res
+
+    # 14.7. Deterministic two-way voice interface & listener controls (Step 34)
+    voice_res = await check_deterministic_voice_query(clean_text, context=context)
+    if voice_res:
+        return voice_res
 
     # 15. Deterministic remote mouse & cursor control (Step 28)
     mouse_res = check_deterministic_mouse_query(clean_text, context=context)

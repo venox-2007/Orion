@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     max_voice_duration_seconds: int = 60
     max_voice_file_size_bytes: int = 5 * 1024 * 1024  # 5 MB
 
+    # Live two-way voice interface & listener (Step 34)
+    voice_autostart: bool = False
+    voice_wake_word: str = "orion"
+    voice_rate: int = 1
+
     # Reminders & timezone configuration (Step 17)
     timezone: str = "Asia/Kolkata"
     reminder_check_interval_seconds: float = 10.0

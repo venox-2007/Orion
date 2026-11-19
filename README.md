@@ -19,7 +19,7 @@ ORION is designed from the ground up to operate locally, respecting user privacy
 
 ---
 
-## Capabilities & Architecture Matrix (Steps 1–33)
+## Capabilities & Architecture Matrix (Steps 1–34)
 
 | Domain | Capability | Architectural Implementation | Key Triggers / Tools |
 | :--- | :--- | :--- | :--- |
@@ -36,6 +36,7 @@ ORION is designed from the ground up to operate locally, respecting user privacy
 | **Scheduled Cron Macros** | Time-Based Autonomous Triggers | Background ticker daemon (30s poll), cron evaluation (`daily`, `weekdays`, `every_hours`, `every_minutes`), automatic Telegram push | `schedule macro <name> <spec>`, `list schedules`, `delete schedule <id>` |
 | **Screen OCR & Vision** | Native WinRT OCR & Click Fallback | Zero-dependency Windows 11 `Windows.Media.Ocr` engine, text extraction, grounded bounding box matching, UIAutomation click fallback | `read screen`, `ocr`, `extract text in chrome`, `click <element> on <app>` |
 | **Screen Watcher & Vision** | Conditional OCR Triggers | Synchronous workflow wait steps (`wait for`), asynchronous background watcher (`watch for`), OCR polling | `wait for "text"`, `watch for "text"`, `list watchers`, `stop watchers` |
+| **Two-Way Voice Interface** | Local STT & Speech Synthesis | Windows native `System.Speech` / SAPI zero-dependency TTS, continuous wake-word (`Orion`), voice mode toggle | `say <text>`, `start voice mode`, `stop voice mode`, `voice status`, `mute voice` |
 
 ---
 
@@ -102,6 +103,7 @@ This launches the FastAPI service (accessible at `http://127.0.0.1:8000/health`)
 - `/windows`: Inspect currently open approved desktop windows.
 - `/active`: Identify the active foreground application.
 - `/schedules`: View active scheduled macro triggers.
+- `/voice`: Toggle or inspect local background wake-word voice listener mode (`/voice start`, `/voice stop`).
 - `/status`: View running and pending task workflows.
 - `/history`: Inspect recent execution history.
 - `/cancel`: Cancel pending execution proposals.
@@ -199,6 +201,15 @@ ORION executes core workstation, input, terminal, memory, and monitoring command
 | `list watchers` / `watchers` | List all active background screen watchers (`show watchers`) |
 | `stop watchers` / `cancel watcher <id>` | Terminate specific or all active background screen watchers (`stop watchers`, `cancel watch_1`) |
 
+#### 11. Two-Way Voice Interface & Speech Controls
+| Trigger Pattern | Action |
+| :--- | :--- |
+| `say "<text>"` / `speak "<text>"` | Speak text aloud on computer speakers with Markdown and emoji stripping (`say "System update complete"`) |
+| `start voice mode` / `enable voice` | Start background microphone listener for wake-word *"Orion"* (`start voice mode`, `/voice start`) |
+| `stop voice mode` / `disable voice` | Stop background microphone listener (`stop voice mode`, `/voice stop`) |
+| `voice status` / `voice mode` | Check active status of microphone listener and TTS engine (`voice status`, `/voice`) |
+| `mute voice` / `stop speaking` / `silence` | Immediately cancel and halt any active text-to-speech audio playback |
+
 ### Running Tests
 
 Execute the automated test suite:
@@ -257,8 +268,12 @@ Orion/
 │       │   ├── winrt_ocr.ps1          # Zero-dependency WinRT Windows.Media.Ocr runner script (Step 32)
 │       │   └── workstation.py         # Workstation power states & session controls (Step 21/23/29.4)
 │       └── voice/
-│           └── transcriber.py         # Local offline faster-whisper speech-to-text
-├── tests/                             # Comprehensive automated test suites (Steps 1–33)
+│           ├── speech_rec.ps1         # Zero-dependency Windows speech recognition listener script (Step 34)
+│           ├── speech_synth.ps1       # Zero-dependency Windows SpeechSynthesizer script (Step 34)
+│           ├── stt.py                 # Local STT listener & wake-word VoiceLoopManager (Step 34)
+│           ├── transcriber.py         # Local offline faster-whisper speech-to-text
+│           └── tts.py                 # Local neural/system text-to-speech engine (Step 34)
+├── tests/                             # Comprehensive automated test suites (Steps 1–34)
 ├── .env.example                       # Documented environment configuration sample
 ├── pyproject.toml                     # Project dependencies & metadata
 └── README.md
