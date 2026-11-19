@@ -705,6 +705,55 @@ def should_bypass_llm_tool_router(clean_text: str) -> bool:
     return False
 
 
+async def check_deterministic_tiling_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check for window tiling, snapping, and workspace layout presets (Step 35)."""
+    clean = clean_text.strip()
+    clean_lower = clean.lower().rstrip(".?! ")
+
+    from orion.tools import window_tiler
+
+    # 1. Workspace Presets: (e.g. "coding mode", "dev workspace", "activate research layout", "focus mode")
+    preset_pat = r"^(?:activate\s+|start\s+|open\s+|switch\s+to\s+)?(coding|dev|research|study|focus)\s+(?:mode|layout|workspace)$"
+    m_preset = re.match(preset_pat, clean_lower)
+    if m_preset:
+        preset_name = m_preset.group(1).lower()
+        success, msg = await window_tiler.apply_workspace_preset(preset_name)
+        return {"handled": True, "reply": msg}
+
+    # 2. Side-by-Side Split: (e.g. "split code and chrome", "tile notepad & chrome", "split chrome with code")
+    split_pat = r"^(?:split|tile)\s+([a-zA-Z0-9_.\- ]+?)\s+(?:and|&|with)\s+([a-zA-Z0-9_.\- ]+)$"
+    m_split = re.match(split_pat, clean_lower)
+    if m_split:
+        app1 = m_split.group(1).strip()
+        app2 = m_split.group(2).strip()
+        s1, m1 = window_tiler.tile_window(app1, "left")
+        s2, m2 = window_tiler.tile_window(app2, "right")
+        if s1 and s2:
+            reply = f"🪟 *Side-by-Side Split Applied:*\n• *{app1}* snapped to *left* (50%)\n• *{app2}* snapped to *right* (50%)"
+        else:
+            errors = []
+            if not s1:
+                errors.append(m1)
+            if not s2:
+                errors.append(m2)
+            reply = "\n".join(errors)
+        return {"handled": True, "reply": reply}
+
+    # 3. Tile / Snap Window: (e.g. "snap chrome left", "tile code to the right half", "dock notepad top-left")
+    snap_pat = r"^(?:snap|tile|move|dock)\s+([a-zA-Z0-9_.\- ]+?)\s+(?:to\s+(?:the\s+)?)?(left|right|top|bottom|top-left|top-right|bottom-left|bottom-right|center|full|maximize)(?:\s+half|\s+screen)?$"
+    m_snap = re.match(snap_pat, clean_lower)
+    if m_snap:
+        target_app = m_snap.group(1).strip()
+        position = m_snap.group(2).strip().lower()
+        success, msg = window_tiler.tile_window(target_app, position)
+        return {"handled": True, "reply": msg}
+
+    return None
+
+
 def check_deterministic_system_query(
     clean_text: str,
     context: dict[str, Any] | None = None,
@@ -2835,6 +2884,11 @@ async def route_and_execute_tool(
         chained_steps = split_chained_commands(clean_text)
         if len(chained_steps) > 1:
             return await execute_workflow(chained_steps, route_and_execute_tool, context=context)
+
+    # 0.5. Deterministic window tiling & workspace presets (Step 35)
+    tiling_res = await check_deterministic_tiling_query(clean_text, context=context)
+    if tiling_res:
+        return tiling_res
 
     # 1. Deterministic multi-action and sequential command detection
     multi_res = check_deterministic_multi_action(clean_text)

@@ -19,7 +19,7 @@ ORION is designed from the ground up to operate locally, respecting user privacy
 
 ---
 
-## Capabilities & Architecture Matrix (Steps 1–34)
+## Capabilities & Architecture Matrix (Steps 1–35)
 
 | Domain | Capability | Architectural Implementation | Key Triggers / Tools |
 | :--- | :--- | :--- | :--- |
@@ -37,6 +37,7 @@ ORION is designed from the ground up to operate locally, respecting user privacy
 | **Screen OCR & Vision** | Native WinRT OCR & Click Fallback | Zero-dependency Windows 11 `Windows.Media.Ocr` engine, text extraction, grounded bounding box matching, UIAutomation click fallback | `read screen`, `ocr`, `extract text in chrome`, `click <element> on <app>` |
 | **Screen Watcher & Vision** | Conditional OCR Triggers | Synchronous workflow wait steps (`wait for`), asynchronous background watcher (`watch for`), OCR polling | `wait for "text"`, `watch for "text"`, `list watchers`, `stop watchers` |
 | **Two-Way Voice Interface** | Local STT & Speech Synthesis | Windows native `System.Speech` / SAPI zero-dependency TTS, continuous wake-word (`Orion`), voice mode toggle | `say <text>`, `start voice mode`, `stop voice mode`, `voice status`, `mute voice` |
+| **Window Tiling & Workspaces** | Spatial Window Manager | Win32 work area geometry (`SPI_GETWORKAREA`), quadrant / half-screen snapping, named layout presets | `snap <app> left`, `tile <app1> and <app2>`, `coding mode`, `research workspace` |
 
 ---
 
@@ -210,6 +211,15 @@ ORION executes core workstation, input, terminal, memory, and monitoring command
 | `voice status` / `voice mode` | Check active status of microphone listener and TTS engine (`voice status`, `/voice`) |
 | `mute voice` / `stop speaking` / `silence` | Immediately cancel and halt any active text-to-speech audio playback |
 
+#### 12. Spatial Window Tiling & Workspace Presets (Step 35)
+| Trigger Pattern | Action |
+| :--- | :--- |
+| `snap <app> <position>` / `tile <app> <position>` | Snap window to screen position: `left`, `right`, `top`, `bottom`, `top-left`, `top-right`, `bottom-left`, `bottom-right`, `center`, `maximize` (`snap chrome left`, `tile code right`) |
+| `split <app1> and <app2>` / `tile <app1> & <app2>` | Arrange two applications side-by-side: app1 left 50%, app2 right 50% (`split code and chrome`, `tile notepad & edge`) |
+| `coding mode` / `dev workspace` | Launch and tile VS Code (left 50%) and Chrome (right 50%) |
+| `research workspace` / `study mode` | Launch and tile Chrome (left 50%) and Notepad (right 50%) |
+| `focus mode` / `minimal workspace` | Maximize target or active application for distraction-free focus |
+
 ### Running Tests
 
 Execute the automated test suite:
@@ -265,6 +275,7 @@ Orion/
 │       │   ├── shell_bridge.py        # Asynchronous PowerShell & CMD runner (Step 27/30.1)
 │       │   ├── system.py              # Read-only hardware & vitals inspector
 │       │   ├── ui_locator.py          # Accessibility-based UI element locator & OCR click fallback (Step 29/29.1/32)
+│       │   ├── window_tiler.py        # Spatial window tiling & workspace presets (Step 35)
 │       │   ├── winrt_ocr.ps1          # Zero-dependency WinRT Windows.Media.Ocr runner script (Step 32)
 │       │   └── workstation.py         # Workstation power states & session controls (Step 21/23/29.4)
 │       └── voice/
@@ -273,7 +284,7 @@ Orion/
 │           ├── stt.py                 # Local STT listener & wake-word VoiceLoopManager (Step 34)
 │           ├── transcriber.py         # Local offline faster-whisper speech-to-text
 │           └── tts.py                 # Local neural/system text-to-speech engine (Step 34)
-├── tests/                             # Comprehensive automated test suites (Steps 1–34)
+├── tests/                             # Comprehensive automated test suites (Steps 1–35)
 ├── .env.example                       # Documented environment configuration sample
 ├── pyproject.toml                     # Project dependencies & metadata
 └── README.md
