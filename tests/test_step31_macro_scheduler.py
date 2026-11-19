@@ -84,6 +84,12 @@ def test_parse_schedule_spec(temp_macro_env):
     spec_h2 = scheduler.parse_schedule_spec("every hour")
     assert spec_h2 == {"schedule_type": "every_hours", "time_of_day": None, "interval_value": 1}
 
+    spec_h3 = scheduler.parse_schedule_spec("every 2 hrs")
+    assert spec_h3 == {"schedule_type": "every_hours", "time_of_day": None, "interval_value": 2}
+
+    spec_h4 = scheduler.parse_schedule_spec("every 4h")
+    assert spec_h4 == {"schedule_type": "every_hours", "time_of_day": None, "interval_value": 4}
+
     # 4. Every N minutes
     spec_m1 = scheduler.parse_schedule_spec("every 30 minutes")
     assert spec_m1 == {"schedule_type": "every_minutes", "time_of_day": None, "interval_value": 30}
@@ -91,8 +97,27 @@ def test_parse_schedule_spec(temp_macro_env):
     spec_m2 = scheduler.parse_schedule_spec("every 15 mins")
     assert spec_m2 == {"schedule_type": "every_minutes", "time_of_day": None, "interval_value": 15}
 
-    spec_m3 = scheduler.parse_schedule_spec("every minute")
-    assert spec_m3 == {"schedule_type": "every_minutes", "time_of_day": None, "interval_value": 1}
+    spec_m3 = scheduler.parse_schedule_spec("every 5 mins")
+    assert spec_m3 == {"schedule_type": "every_minutes", "time_of_day": None, "interval_value": 5}
+
+    spec_m4 = scheduler.parse_schedule_spec("every minute")
+    assert spec_m4 == {"schedule_type": "every_minutes", "time_of_day": None, "interval_value": 1}
+
+    spec_m5 = scheduler.parse_schedule_spec("every 10m")
+    assert spec_m5 == {"schedule_type": "every_minutes", "time_of_day": None, "interval_value": 10}
+
+    # 5. Every N seconds
+    spec_s1 = scheduler.parse_schedule_spec("every 15 secs")
+    assert spec_s1 == {"schedule_type": "every_seconds", "time_of_day": None, "interval_value": 15}
+
+    spec_s2 = scheduler.parse_schedule_spec("every 30 seconds")
+    assert spec_s2 == {"schedule_type": "every_seconds", "time_of_day": None, "interval_value": 30}
+
+    spec_s3 = scheduler.parse_schedule_spec("every second")
+    assert spec_s3 == {"schedule_type": "every_seconds", "time_of_day": None, "interval_value": 1}
+
+    spec_s4 = scheduler.parse_schedule_spec("every 45s")
+    assert spec_s4 == {"schedule_type": "every_seconds", "time_of_day": None, "interval_value": 45}
 
     # Invalid spec
     with pytest.raises(ValueError):
@@ -131,6 +156,10 @@ def test_compute_next_run(temp_macro_env):
     # 6. Every minutes
     next_30m = scheduler.compute_next_run("every_minutes", None, 30, now=now_thurs_morning)
     assert next_30m == datetime(2026, 11, 12, 8, 30, 0)
+
+    # 7. Every seconds
+    next_15s = scheduler.compute_next_run("every_seconds", None, 15, now=now_thurs_morning)
+    assert next_15s == datetime(2026, 11, 12, 8, 0, 15)
 
 
 def test_scheduler_crud_lifecycle(temp_macro_env):
@@ -266,6 +295,14 @@ async def test_router_schedule_commands(temp_macro_env):
         assert "⏰ *Macro 'backup' scheduled:*" in res_sched2["reply"]
         assert "Every 2 hours" in res_sched2["reply"]
 
+        # 3b. Schedule with short units ("every 15 secs")
+        store.save_macro("pulse", ["where is my mouse"])
+        res_sched_pulse = await route_and_execute_tool("schedule macro pulse every 15 secs")
+        assert res_sched_pulse is not None
+        assert res_sched_pulse["handled"] is True
+        assert "⏰ *Macro 'pulse' scheduled:*" in res_sched_pulse["reply"]
+        assert "Every 15 seconds" in res_sched_pulse["reply"]
+
         # 4. Invalid schedule specification
         res_invalid = await route_and_execute_tool("schedule macro backup whenever it feels right")
         assert res_invalid is not None
@@ -276,15 +313,16 @@ async def test_router_schedule_commands(temp_macro_env):
         res_list = await route_and_execute_tool("list schedules")
         assert res_list is not None
         assert res_list["handled"] is True
-        assert "📅 *Scheduled Macros (2):*" in res_list["reply"]
+        assert "📅 *Scheduled Macros (3):*" in res_list["reply"]
         assert "Daily at 08:30" in res_list["reply"]
         assert "Every 2 hours" in res_list["reply"]
+        assert "Every 15 seconds" in res_list["reply"]
 
         # Sched list alias: "schedules"
         res_list_alias = await route_and_execute_tool("schedules")
         assert res_list_alias is not None
         assert res_list_alias["handled"] is True
-        assert "📅 *Scheduled Macros (2):*" in res_list_alias["reply"]
+        assert "📅 *Scheduled Macros (3):*" in res_list_alias["reply"]
 
         # 6. Delete schedule
         res_del = await route_and_execute_tool("delete schedule 1")
@@ -297,6 +335,11 @@ async def test_router_schedule_commands(temp_macro_env):
         assert res_del2 is not None
         assert res_del2["handled"] is True
         assert "🗑️ *Scheduled trigger #2 deleted.*" in res_del2["reply"]
+
+        # Delete schedule 3
+        res_del3 = await route_and_execute_tool("delete schedule 3")
+        assert res_del3 is not None
+        assert res_del3["handled"] is True
 
         # Delete non-existent schedule
         res_del_missing = await route_and_execute_tool("remove schedule 99")

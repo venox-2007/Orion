@@ -1262,7 +1262,8 @@ async def check_deterministic_macro_and_workflow_query(
         human_desc = human_readable_spec(sched["schedule_type"], sched["time_of_day"], sched["interval_value"])
         try:
             dt = datetime.fromisoformat(sched["next_run_at"])
-            next_str = dt.strftime("%Y-%m-%d %H:%M")
+            fmt = "%Y-%m-%d %H:%M:%S" if sched.get("schedule_type") == "every_seconds" else "%Y-%m-%d %H:%M"
+            next_str = dt.strftime(fmt)
         except Exception:
             next_str = sched["next_run_at"]
 

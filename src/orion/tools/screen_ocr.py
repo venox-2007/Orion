@@ -12,6 +12,7 @@ from ctypes import wintypes
 import json
 import logging
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import uuid
@@ -120,7 +121,11 @@ def _run_winrt_ocr_ps(image_path: Path) -> dict[str, Any]:
         json_start = stdout.find("{")
         if json_start != -1:
             json_str = stdout[json_start:]
-            data = json.loads(json_str)
+            try:
+                data = json.loads(json_str, strict=False)
+            except Exception:
+                cleaned_json = re.sub(r"[\x00-\x1f]", " ", json_str)
+                data = json.loads(cleaned_json, strict=False)
             return data
 
         return {"success": False, "error": f"Invalid JSON output: {stdout}", "text": "", "lines": [], "words": []}

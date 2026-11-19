@@ -59,6 +59,9 @@ def human_readable_spec(schedule_type: str, time_of_day: str | None, interval_va
     elif schedule_type == "every_minutes":
         val = interval_value or 1
         return f"Every {val} minutes" if val > 1 else "Every minute"
+    elif schedule_type == "every_seconds":
+        val = interval_value or 1
+        return f"Every {val} seconds" if val > 1 else "Every second"
     return f"{schedule_type}"
 
 
@@ -147,8 +150,8 @@ class MacroScheduler:
                 "interval_value": None,
             }
 
-        # 3. Every N hours: e.g. "every 2 hours", "every 1 hour", "every hour", "every 4h"
-        m_every_hours = re.match(r"^every\s+(?:(\d+)\s*(?:hours?|h)|hour)$", clean)
+        # 3. Every N hours: e.g. "every 2 hours", "every 2 hrs", "every 1 hour", "every hour", "every 4h"
+        m_every_hours = re.match(r"^every\s+(?:(\d+)\s*(?:hours?|hrs?|h)|hour)$", clean)
         if m_every_hours:
             val = int(m_every_hours.group(1)) if m_every_hours.group(1) else 1
             if val <= 0:
@@ -159,7 +162,7 @@ class MacroScheduler:
                 "interval_value": val,
             }
 
-        # 4. Every N minutes: e.g. "every 30 minutes", "every 15 mins", "every minute", "every 45m"
+        # 4. Every N minutes: e.g. "every 30 minutes", "every 15 mins", "every 5 min", "every minute", "every 45m"
         m_every_mins = re.match(r"^every\s+(?:(\d+)\s*(?:minutes?|mins?|m)|minute)$", clean)
         if m_every_mins:
             val = int(m_every_mins.group(1)) if m_every_mins.group(1) else 1
@@ -171,9 +174,21 @@ class MacroScheduler:
                 "interval_value": val,
             }
 
+        # 5. Every N seconds: e.g. "every 15 secs", "every 10 sec", "every 30 seconds", "every second", "every 5s"
+        m_every_secs = re.match(r"^every\s+(?:(\d+)\s*(?:seconds?|secs?|s)|second)$", clean)
+        if m_every_secs:
+            val = int(m_every_secs.group(1)) if m_every_secs.group(1) else 1
+            if val <= 0:
+                raise ValueError("Interval seconds must be greater than 0.")
+            return {
+                "schedule_type": "every_seconds",
+                "time_of_day": None,
+                "interval_value": val,
+            }
+
         raise ValueError(
             f"Invalid schedule specification: '{spec}'. "
-            "Supported formats: 'daily at HH:MM', 'weekdays at HH:MM', 'every N hours', 'every N minutes'."
+            "Supported formats: 'daily at HH:MM', 'weekdays at HH:MM', 'every N hours', 'every N minutes', 'every N seconds'."
         )
 
     def compute_next_run(
@@ -188,7 +203,11 @@ class MacroScheduler:
             now = datetime.now()
         now = now.replace(microsecond=0)
 
-        if schedule_type == "every_minutes":
+        if schedule_type == "every_seconds":
+            interval = interval_value or 1
+            return now + timedelta(seconds=interval)
+
+        elif schedule_type == "every_minutes":
             interval = interval_value or 1
             return now + timedelta(minutes=interval)
 
@@ -373,7 +392,8 @@ class MacroScheduler:
             next_run = s.get("next_run_at", "")
             try:
                 dt = datetime.fromisoformat(next_run)
-                next_run_str = dt.strftime("%Y-%m-%d %H:%M")
+                fmt = "%Y-%m-%d %H:%M:%S" if stype == "every_seconds" else "%Y-%m-%d %H:%M"
+                next_run_str = dt.strftime(fmt)
             except Exception:
                 next_run_str = next_run
 

@@ -60,6 +60,11 @@ try {
     $softwareBitmap = Await-WinRT ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
     $ocrResult = Await-WinRT ($ocr.RecognizeAsync($softwareBitmap)) ([Windows.Media.Ocr.OcrResult])
 
+    function Clean-Text([string]$str) {
+        if (-not $str) { return "" }
+        return [regex]::Replace($str, '[\x00-\x1F\x7F]', ' ')
+    }
+
     $linesOut = @()
     $wordsOut = @()
 
@@ -67,7 +72,7 @@ try {
         $lineWords = @()
         foreach ($w in $line.Words) {
             $wordObj = @{
-                text = $w.Text
+                text = (Clean-Text $w.Text).Trim()
                 x = [int][Math]::Round($w.BoundingRect.X)
                 y = [int][Math]::Round($w.BoundingRect.Y)
                 w = [int][Math]::Round($w.BoundingRect.Width)
@@ -77,7 +82,7 @@ try {
             $wordsOut += $wordObj
         }
         $linesOut += @{
-            text = $line.Text
+            text = (Clean-Text $line.Text).Trim()
             words = $lineWords
         }
     }
@@ -87,7 +92,7 @@ try {
 
     @{
         success = $true
-        text = $ocrResult.Text
+        text = (Clean-Text $ocrResult.Text).Trim()
         lines = $linesOut
         words = $wordsOut
     } | ConvertTo-Json -Depth 5 -Compress

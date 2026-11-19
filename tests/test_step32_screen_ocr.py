@@ -201,3 +201,14 @@ async def test_router_ocr_commands():
         assert res_trunc["handled"] is True
         assert "... [truncated]" in res_trunc["reply"]
         assert len(res_trunc["reply"]) < 3200
+
+
+def test_ocr_json_control_characters_sanitization():
+    """Verify _run_winrt_ocr_ps correctly parses JSON containing raw control characters without failing."""
+    raw_stdout_with_ctrl = '{"success": true, "text": "Header\x01\x02Line\tWith\x1fCtrl", "lines": [], "words": []}'
+    mock_proc = MagicMock(stdout=raw_stdout_with_ctrl, stderr="")
+    with patch("subprocess.run", return_value=mock_proc):
+        data = screen_ocr._run_winrt_ocr_ps(MagicMock())
+        assert data["success"] is True
+        assert "Header" in data["text"]
+        assert "Line" in data["text"]
