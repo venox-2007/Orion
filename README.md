@@ -19,7 +19,7 @@ ORION is designed from the ground up to operate locally, respecting user privacy
 
 ---
 
-## Capabilities & Architecture Matrix (Steps 1–32)
+## Capabilities & Architecture Matrix (Steps 1–33)
 
 | Domain | Capability | Architectural Implementation | Key Triggers / Tools |
 | :--- | :--- | :--- | :--- |
@@ -35,6 +35,7 @@ ORION is designed from the ground up to operate locally, respecting user privacy
 | **Multi-Action & Macros** | Workflow Runner & Macros | Sequential multi-command chaining (`then`, `&&`, `;`), window readiness polling, SQLite persistent named macros | `<cmd1> then <cmd2>`, `macro save <name>: ...`, `macro <name>`, `list macros` |
 | **Scheduled Cron Macros** | Time-Based Autonomous Triggers | Background ticker daemon (30s poll), cron evaluation (`daily`, `weekdays`, `every_hours`, `every_minutes`), automatic Telegram push | `schedule macro <name> <spec>`, `list schedules`, `delete schedule <id>` |
 | **Screen OCR & Vision** | Native WinRT OCR & Click Fallback | Zero-dependency Windows 11 `Windows.Media.Ocr` engine, text extraction, grounded bounding box matching, UIAutomation click fallback | `read screen`, `ocr`, `extract text in chrome`, `click <element> on <app>` |
+| **Screen Watcher & Vision** | Conditional OCR Triggers | Synchronous workflow wait steps (`wait for`), asynchronous background watcher (`watch for`), OCR polling | `wait for "text"`, `watch for "text"`, `list watchers`, `stop watchers` |
 
 ---
 
@@ -190,6 +191,14 @@ ORION executes core workstation, input, terminal, memory, and monitoring command
 | `read screen` / `ocr` | Perform native WinRT OCR over the full desktop screen (`extract text`) |
 | `read text in <app>` | Capture and extract text specifically within target application window (`ocr chrome`, `read screen notepad`) |
 
+#### 10. Conditional Screen Watcher & Wait Triggers
+| Trigger Pattern | Action |
+| :--- | :--- |
+| `wait for "<text>" [in <app>] [timeout <n>s]` | Poll screen OCR synchronously until target text appears (default 30s) before advancing in workflow (`wait for "Search" in chrome timeout 10s`) |
+| `watch for "<text>" [in <app>]` | Non-blocking background screen monitor (up to 15m) that pushes Telegram notification on match (`watch for "Build Succeeded"`) |
+| `list watchers` / `watchers` | List all active background screen watchers (`show watchers`) |
+| `stop watchers` / `cancel watcher <id>` | Terminate specific or all active background screen watchers (`stop watchers`, `cancel watch_1`) |
+
 ### Running Tests
 
 Execute the automated test suite:
@@ -240,6 +249,7 @@ Orion/
 │       │   ├── router.py              # Waterfall deterministic intent routing engine
 │       │   ├── screen_capture.py      # Desktop screenshot capture (Step 20)
 │       │   ├── screen_ocr.py          # Native Windows WinRT OCR extraction & coordinate finder (Step 32)
+│       │   ├── screen_watcher.py      # Conditional screen text watcher & workflow wait triggers (Step 33)
 │       │   ├── security.py            # Path sandboxing & security guards
 │       │   ├── shell_bridge.py        # Asynchronous PowerShell & CMD runner (Step 27/30.1)
 │       │   ├── system.py              # Read-only hardware & vitals inspector
@@ -248,7 +258,7 @@ Orion/
 │       │   └── workstation.py         # Workstation power states & session controls (Step 21/23/29.4)
 │       └── voice/
 │           └── transcriber.py         # Local offline faster-whisper speech-to-text
-├── tests/                             # Comprehensive automated test suites (Steps 1–32)
+├── tests/                             # Comprehensive automated test suites (Steps 1–33)
 ├── .env.example                       # Documented environment configuration sample
 ├── pyproject.toml                     # Project dependencies & metadata
 └── README.md

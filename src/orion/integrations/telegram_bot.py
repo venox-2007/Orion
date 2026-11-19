@@ -983,12 +983,20 @@ def create_telegram_app(
                     return
 
             reply_text = "Sorry, I took too long to process that request. Please try again."
+
+            async def _notify_cb(msg: str) -> None:
+                try:
+                    await send_formatted_message(reply_target, msg)
+                except Exception as ex:
+                    logger.error("Failed to deliver background notification: %s", ex)
+
             ctx = {
                 "user_id": owner_id,
                 "owner_id": owner_id,
                 "memory": conv_memory,
                 "last_action": user_last_actions.get(owner_id),
                 "watchdog": watchdog_engine,
+                "notify_cb": _notify_cb,
             }
             try:
                 # 1. Attempt natural-language tool routing first

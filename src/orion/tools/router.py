@@ -1616,8 +1616,13 @@ def check_deterministic_process_and_power_query(
             "display",
             "monitor",
             "watchdog",
+            "watcher",
+            "watchers",
         }
-        if clean_target in non_app_words or clean_target.startswith(("task ", "reminder ")):
+        if (
+            clean_target in non_app_words
+            or clean_target.startswith(("task ", "reminder ", "watcher ", "watch_"))
+        ):
             return None
 
         from orion.tools import process_manager
@@ -1963,6 +1968,85 @@ async def check_deterministic_ocr_query(
 
     reply = f"👁️ *Screen OCR ({title}):*\n```\n{text_content}\n```"
     return {"handled": True, "reply": reply}
+
+
+async def check_deterministic_watcher_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check for screen watcher and workflow wait triggers (Step 33)."""
+    clean = clean_text.strip()
+    clean_lower = clean.lower().rstrip(".?! ")
+
+    from orion.tools import screen_watcher
+
+    # 1. Manage Watchers: list / show / watchers
+    list_pat = r"^(?:list\s+watchers|show\s+watchers|watchers)$"
+    if re.match(list_pat, clean_lower):
+        watchers = screen_watcher.list_watchers()
+        if not watchers:
+            return {
+                "handled": True,
+                "reply": "👁️ *Active Screen Watchers:*\n_No background screen watchers currently active._",
+            }
+        lines = [f"👁️ *Active Screen Watchers ({len(watchers)}):*"]
+        for w in watchers:
+            app_info = f" in *{w['target_app']}*" if w.get("target_app") else ""
+            mins = int(w.get("timeout_sec", 900) // 60)
+            lines.append(f"• `{w['id']}`: watching for *'{w['query']}'*{app_info} (timeout: {mins}m)")
+        return {"handled": True, "reply": "\n".join(lines)}
+
+    # 2. Cancel / Stop Watchers: stop watchers, cancel watcher, stop watch_1, cancel watch_1, etc.
+    cancel_pat = r"^(?:stop|cancel)\s+(?:watch(?:er)?s?(?:\s+([a-zA-Z0-9_]+))?|(watch_\d+))$"
+    m_cancel = re.match(cancel_pat, clean_lower)
+    if m_cancel:
+        target = m_cancel.group(1) or m_cancel.group(2)
+        count = screen_watcher.cancel_watcher(target)
+        if count > 0:
+            if target and target.lower() not in ("all", "*"):
+                reply = f"🛑 Cancelled screen watcher `{target}`."
+            else:
+                reply = f"🛑 Cancelled {count} active screen watcher(s)."
+        else:
+            if target:
+                reply = f"⚠️ No active screen watcher found matching `{target}`."
+            else:
+                reply = "⚠️ No active screen watchers to cancel."
+        return {"handled": True, "reply": reply}
+
+    # 3. Synchronous Wait for text: wait for "<text>" [in <app>] [timeout <N>s]
+    wait_pat = r"^wait\s+for\s+[\"']?(.+?)[\"']?(?:\s+(?:in|on)\s+([a-zA-Z0-9_.\- ]+?))?(?:\s+(?:for|timeout)\s+(\d+)\s*s(?:ec(?:onds)?)?)?$"
+    m_wait = re.match(wait_pat, clean, re.IGNORECASE)
+    if m_wait:
+        raw_query = m_wait.group(1).strip().strip("'\"")
+        target_app = m_wait.group(2).strip() if m_wait.group(2) else None
+        timeout_str = m_wait.group(3)
+        timeout_sec = min(float(timeout_str), 120.0) if timeout_str else 30.0
+
+        success, msg = await screen_watcher.wait_for_screen_text(
+            raw_query,
+            target_app=target_app,
+            timeout_sec=timeout_sec,
+        )
+        return {"handled": True, "reply": msg}
+
+    # 4. Asynchronous Background Watch: watch [screen] for "<text>" [in <app>]
+    watch_pat = r"^watch\s+(?:screen\s+)?for\s+[\"']?(.+?)[\"']?(?:\s+(?:in|on)\s+([a-zA-Z0-9_.\- ]+))?$"
+    m_watch = re.match(watch_pat, clean, re.IGNORECASE)
+    if m_watch:
+        raw_query = m_watch.group(1).strip().strip("'\"")
+        target_app = m_watch.group(2).strip() if m_watch.group(2) else None
+        notify_cb = (context or {}).get("notify_cb")
+
+        watch_id = screen_watcher.start_background_watcher(
+            raw_query,
+            notify_cb,
+            target_app=target_app,
+        )
+        reply = f"👁️ *Watching screen for '{raw_query}'* (ID: `{watch_id}`, timeout: 15m). I'll ping you when it appears."
+        return {"handled": True, "reply": reply}
+
+    return None
 
 
 def check_deterministic_mouse_query(
@@ -2826,6 +2910,11 @@ async def route_and_execute_tool(
     ocr_res = await check_deterministic_ocr_query(clean_text, context=context)
     if ocr_res:
         return ocr_res
+
+    # 14.6. Deterministic screen watcher & workflow wait triggers (Step 33)
+    watcher_res = await check_deterministic_watcher_query(clean_text, context=context)
+    if watcher_res:
+        return watcher_res
 
     # 15. Deterministic remote mouse & cursor control (Step 28)
     mouse_res = check_deterministic_mouse_query(clean_text, context=context)
