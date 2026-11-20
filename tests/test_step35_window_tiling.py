@@ -84,9 +84,10 @@ def test_tile_window_maximize():
 
 @pytest.mark.asyncio
 async def test_apply_workspace_preset_coding():
-    """Verify apply_workspace_preset('coding') arranges VS Code left and Chrome right."""
+    """Verify apply_workspace_preset('coding') arranges VS Code left and Brave right."""
     with patch("orion.tools.window_tiler.find_target_window") as mock_find, \
-         patch("orion.tools.window_tiler.tile_window") as mock_tile:
+         patch("orion.tools.window_tiler.tile_window") as mock_tile, \
+         patch("orion.tools.window_tiler._launch_brave_if_needed") as mock_launch_brave:
 
         # Both apps already open
         mock_find.side_effect = lambda app: (111 if "code" in app else 222, app.title())
@@ -97,7 +98,26 @@ async def test_apply_workspace_preset_coding():
         assert success is True
         assert "Workspace Preset 'coding' Applied:" in msg
         assert "VS Code" in msg and "left" in msg
-        assert "Google Chrome" in msg and "right" in msg
+        assert "Brave" in msg and "right" in msg
+        assert "<" not in msg and ">" not in msg
+
+
+@pytest.mark.asyncio
+async def test_apply_workspace_preset_research():
+    """Verify apply_workspace_preset('research') arranges Brave left and Notepad right."""
+    with patch("orion.tools.window_tiler.find_target_window") as mock_find, \
+         patch("orion.tools.window_tiler.tile_window") as mock_tile, \
+         patch("orion.tools.window_tiler._launch_brave_if_needed") as mock_launch_brave:
+
+        mock_find.side_effect = lambda app: (222 if "brave" in app else 333, app.title())
+        mock_tile.return_value = (True, "Tiled successfully.")
+
+        success, msg = await window_tiler.apply_workspace_preset("research")
+
+        assert success is True
+        assert "Workspace Preset 'research' Applied:" in msg
+        assert "Brave" in msg and "left" in msg
+        assert "Notepad" in msg and "right" in msg
         assert "<" not in msg and ">" not in msg
 
 

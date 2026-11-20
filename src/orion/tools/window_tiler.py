@@ -6,7 +6,10 @@ import asyncio
 import ctypes
 from ctypes import wintypes
 import logging
+import os
+from pathlib import Path
 import re
+import subprocess
 import sys
 from typing import Any
 
@@ -137,6 +140,7 @@ def find_target_window(app_name: str) -> tuple[int | None, str]:
     name_mappings = {
         "notepad": ["notepad"],
         "chrome": ["chrome", "google chrome"],
+        "brave": ["brave", "brave browser"],
         "code": ["visual studio code", "vscode", "code"],
         "vscode": ["visual studio code", "vscode", "code"],
         "telegram": ["telegram"],
@@ -230,6 +234,48 @@ def tile_window(app_name: str, position: str) -> tuple[bool, str]:
         return False, f"⚠️ Failed to tile window *'{app_name}'*: {err}"
 
 
+def _launch_brave_if_needed() -> None:
+    """Ensure Brave browser is launched if no window currently exists."""
+    hwnd_brave, _ = find_target_window("brave")
+    if hwnd_brave:
+        return
+    from orion.tools import app_launcher
+
+    res = app_launcher.launch_application("brave")
+    if res.get("success"):
+        return
+
+    # Direct launch fallback for standard Windows Brave installation paths
+    cand_paths = [
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        / "BraveSoftware"
+        / "Brave-Browser"
+        / "Application"
+        / "brave.exe",
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+        / "BraveSoftware"
+        / "Brave-Browser"
+        / "Application"
+        / "brave.exe",
+    ]
+    local_ad = os.environ.get("LOCALAPPDATA")
+    if local_ad:
+        cand_paths.append(
+            Path(local_ad)
+            / "BraveSoftware"
+            / "Brave-Browser"
+            / "Application"
+            / "brave.exe"
+        )
+    for cp in cand_paths:
+        if cp.is_file():
+            try:
+                subprocess.Popen([str(cp)])
+                break
+            except Exception as e:
+                logger.debug("Failed to spawn Brave executable at %s: %s", cp, e)
+
+
 async def apply_workspace_preset(preset_name: str) -> tuple[bool, str]:
     """Apply named multi-application desktop workspace arrangement."""
     clean = preset_name.strip().lower()
@@ -242,56 +288,53 @@ async def apply_workspace_preset(preset_name: str) -> tuple[bool, str]:
         if not hwnd_code:
             app_launcher.launch_application("vscode")
 
-        # Check / Launch Chrome / Browser
-        hwnd_chrome, _ = find_target_window("chrome")
-        if not hwnd_chrome:
-            app_launcher.launch_application("chrome")
+        # Check / Launch Brave
+        _launch_brave_if_needed()
 
         # Poll briefly for windows to surface if newly spawned
         for _ in range(6):
             hwnd_code, _ = find_target_window("code")
-            hwnd_chrome, _ = find_target_window("chrome")
-            if hwnd_code and hwnd_chrome:
+            hwnd_brave, _ = find_target_window("brave")
+            if hwnd_code and hwnd_brave:
                 break
             await asyncio.sleep(0.5)
 
         s1, m1 = tile_window("code", "left")
-        s2, m2 = tile_window("chrome", "right")
+        s2, m2 = tile_window("brave", "right")
         if not s1 and not s2:
-            return False, "⚠️ Could not arrange coding workspace (neither VS Code nor Chrome window found)."
+            return False, "⚠️ Could not arrange coding workspace (neither VS Code nor Brave window found)."
 
         return True, (
             "🪟 *Workspace Preset 'coding' Applied:*\n"
             "• *VS Code* snapped to *left* (50%)\n"
-            "• *Google Chrome* snapped to *right* (50%)"
+            "• *Brave* snapped to *right* (50%)"
         )
 
     elif clean in ("research", "study"):
         from orion.tools import app_launcher
 
-        hwnd_chrome, _ = find_target_window("chrome")
-        if not hwnd_chrome:
-            app_launcher.launch_application("chrome")
+        # Check / Launch Brave
+        _launch_brave_if_needed()
 
         hwnd_notepad, _ = find_target_window("notepad")
         if not hwnd_notepad:
             app_launcher.launch_application("notepad")
 
         for _ in range(6):
-            hwnd_chrome, _ = find_target_window("chrome")
+            hwnd_brave, _ = find_target_window("brave")
             hwnd_notepad, _ = find_target_window("notepad")
-            if hwnd_chrome and hwnd_notepad:
+            if hwnd_brave and hwnd_notepad:
                 break
             await asyncio.sleep(0.5)
 
-        s1, m1 = tile_window("chrome", "left")
+        s1, m1 = tile_window("brave", "left")
         s2, m2 = tile_window("notepad", "right")
         if not s1 and not s2:
-            return False, "⚠️ Could not arrange research workspace (neither Chrome nor Notepad window found)."
+            return False, "⚠️ Could not arrange research workspace (neither Brave nor Notepad window found)."
 
         return True, (
             "🪟 *Workspace Preset 'research' Applied:*\n"
-            "• *Google Chrome* snapped to *left* (50%)\n"
+            "• *Brave* snapped to *left* (50%)\n"
             "• *Notepad* snapped to *right* (50%)"
         )
 

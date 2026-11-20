@@ -100,6 +100,40 @@ async def test_speak_text_and_stop_speaking():
         await task
 
 
+@pytest.mark.asyncio
+async def test_listen_once_wake_word_and_confidence():
+    """Verify listen_once captures recognized speech and logs hypothesis/errors."""
+    # 1. Success case: confidence >= 0.35 returned
+    mock_proc_ok = MagicMock()
+    mock_proc_ok.communicate = AsyncMock(
+        return_value=(b"Orion open notepad\n", b"Raw hypothesis: 'Orion open notepad' (confidence: 0.85)\n")
+    )
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc_ok), \
+         patch("pathlib.Path.exists", return_value=True):
+        res = await stt.listen_once(timeout_sec=2.0)
+        assert res == "Orion open notepad"
+
+    # 2. Low confidence rejection (< 0.35): stdout empty, rejection logged to stderr
+    mock_proc_low = MagicMock()
+    mock_proc_low.communicate = AsyncMock(
+        return_value=(b"", b"Rejected hypothesis 'Ryan': confidence 0.22 < 0.35\n")
+    )
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc_low), \
+         patch("pathlib.Path.exists", return_value=True):
+        res = await stt.listen_once(timeout_sec=2.0)
+        assert res is None
+
+    # 3. Audio/Microphone warning in stderr
+    mock_proc_err = MagicMock()
+    mock_proc_err.communicate = AsyncMock(
+        return_value=(b"", b"Microphone unavailable or audio input error\n")
+    )
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc_err), \
+         patch("pathlib.Path.exists", return_value=True):
+        res = await stt.listen_once(timeout_sec=2.0)
+        assert res is None
+
+
 def test_extract_wake_command():
     """Verify wake word identification and subsequent command extraction."""
     # Direct command with wake word

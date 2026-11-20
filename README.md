@@ -216,8 +216,8 @@ ORION executes core workstation, input, terminal, memory, and monitoring command
 | :--- | :--- |
 | `snap <app> <position>` / `tile <app> <position>` | Snap window to screen position: `left`, `right`, `top`, `bottom`, `top-left`, `top-right`, `bottom-left`, `bottom-right`, `center`, `maximize` (`snap chrome left`, `tile code right`) |
 | `split <app1> and <app2>` / `tile <app1> & <app2>` | Arrange two applications side-by-side: app1 left 50%, app2 right 50% (`split code and chrome`, `tile notepad & edge`) |
-| `coding mode` / `dev workspace` | Launch and tile VS Code (left 50%) and Chrome (right 50%) |
-| `research workspace` / `study mode` | Launch and tile Chrome (left 50%) and Notepad (right 50%) |
+| `coding mode` / `dev workspace` | Launch and tile VS Code (left 50%) and Brave (right 50%) |
+| `research workspace` / `study mode` | Launch and tile Brave (left 50%) and Notepad (right 50%) |
 | `focus mode` / `minimal workspace` | Maximize target or active application for distraction-free focus |
 
 ### Running Tests

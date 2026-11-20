@@ -34,11 +34,26 @@ async def listen_once(timeout_sec: float = 6.0) -> str | None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec + 4.0)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec + 4.0)
+
+        err_msg = stderr.decode("utf-8", errors="replace").strip()
+        if err_msg:
+            for line in err_msg.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if any(k in line.lower() for k in ("error", "exception", "unavailable", "failed")):
+                    logger.warning("STT audio warning: %s", line)
+                else:
+                    logger.info("STT listener: %s", line)
+
         text = stdout.decode("utf-8", errors="replace").strip()
-        return text if text else None
+        if text:
+            logger.info("STT recognized text: '%s'", text)
+            return text
+        return None
     except Exception as err:
-        logger.debug("STT listen_once error: %s", err)
+        logger.error("STT listen_once error: %s", err)
         return None
 
 
