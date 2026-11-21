@@ -19,7 +19,7 @@ ORION is designed from the ground up to operate locally, respecting user privacy
 
 ---
 
-## Capabilities & Architecture Matrix (Steps 1–35)
+## Capabilities & Architecture Matrix (Steps 1–36)
 
 | Domain | Capability | Architectural Implementation | Key Triggers / Tools |
 | :--- | :--- | :--- | :--- |
@@ -38,6 +38,7 @@ ORION is designed from the ground up to operate locally, respecting user privacy
 | **Screen Watcher & Vision** | Conditional OCR Triggers | Synchronous workflow wait steps (`wait for`), asynchronous background watcher (`watch for`), OCR polling | `wait for "text"`, `watch for "text"`, `list watchers`, `stop watchers` |
 | **Two-Way Voice Interface** | Local STT & Speech Synthesis | Windows native `System.Speech` / SAPI zero-dependency TTS, continuous wake-word (`Orion`), voice mode toggle | `say <text>`, `start voice mode`, `stop voice mode`, `voice status`, `mute voice` |
 | **Window Tiling & Workspaces** | Spatial Window Manager | Win32 work area geometry (`SPI_GETWORKAREA`), quadrant / half-screen snapping, named layout presets | `snap <app> left`, `tile <app1> and <app2>`, `coding mode`, `research workspace` |
+| **Live Voice Call HUD** | Web/WebSocket Voice Call | FastAPI `/voice-call` HUD, `/ws/voice` bridge, browser `webkitSpeechRecognition`, `speechSynthesis`, visual orb | `start voice call`, `call orion`, `hang up`, `voice status` |
 
 ---
 
@@ -202,13 +203,13 @@ ORION executes core workstation, input, terminal, memory, and monitoring command
 | `list watchers` / `watchers` | List all active background screen watchers (`show watchers`) |
 | `stop watchers` / `cancel watcher <id>` | Terminate specific or all active background screen watchers (`stop watchers`, `cancel watch_1`) |
 
-#### 11. Two-Way Voice Interface & Speech Controls
+#### 11. Two-Way Voice Interface & Live JARVIS Voice Call HUD (Steps 34 & 36)
 | Trigger Pattern | Action |
 | :--- | :--- |
 | `say "<text>"` / `speak "<text>"` | Speak text aloud on computer speakers with Markdown and emoji stripping (`say "System update complete"`) |
-| `start voice mode` / `enable voice` | Start background microphone listener for wake-word *"Orion"* (`start voice mode`, `/voice start`) |
-| `stop voice mode` / `disable voice` | Stop background microphone listener (`stop voice mode`, `/voice stop`) |
-| `voice status` / `voice mode` | Check active status of microphone listener and TTS engine (`voice status`, `/voice`) |
+| `start voice mode` / `start voice call` / `call orion` | Launch real-time JARVIS Voice Call HUD in browser (`/voice-call`) with live speech recognition and WebSocket bridge |
+| `stop voice mode` / `end voice call` / `hang up` | Terminate active JARVIS voice call session and stop speech synthesis |
+| `voice status` / `call status` | Check status of active voice call and connected HUD clients |
 | `mute voice` / `stop speaking` / `silence` | Immediately cancel and halt any active text-to-speech audio playback |
 
 #### 12. Spatial Window Tiling & Workspace Presets (Step 35)
@@ -283,8 +284,9 @@ Orion/
 │           ├── speech_synth.ps1       # Zero-dependency Windows SpeechSynthesizer script (Step 34)
 │           ├── stt.py                 # Local STT listener & wake-word VoiceLoopManager (Step 34)
 │           ├── transcriber.py         # Local offline faster-whisper speech-to-text
-│           └── tts.py                 # Local neural/system text-to-speech engine (Step 34)
-├── tests/                             # Comprehensive automated test suites (Steps 1–35)
+│           ├── tts.py                 # Local neural/system text-to-speech engine (Step 34)
+│           └── voice_call.py          # Real-time JARVIS Voice Call HUD & WebSocket bridge (Step 36)
+├── tests/                             # Comprehensive automated test suites (Steps 1–36)
 ├── .env.example                       # Documented environment configuration sample
 ├── pyproject.toml                     # Project dependencies & metadata
 └── README.md

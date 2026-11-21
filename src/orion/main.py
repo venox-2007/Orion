@@ -4,7 +4,8 @@ from contextlib import asynccontextmanager
 import logging
 from typing import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
+from fastapi.responses import HTMLResponse
 from orion.config.settings import get_settings
 from orion.integrations.telegram_bot import create_telegram_app
 
@@ -99,3 +100,20 @@ app = FastAPI(
 def health_check() -> dict[str, str]:
     """Health check endpoint returning service status."""
     return {"status": "healthy"}
+
+
+@app.get("/voice-call", response_class=HTMLResponse)
+def voice_call_hud() -> HTMLResponse:
+    """Serve the JARVIS Voice Call HUD interface (Step 36)."""
+    from orion.voice.voice_call import get_hud_html
+
+    return HTMLResponse(content=get_hud_html(), status_code=200)
+
+
+@app.websocket("/ws/voice")
+async def voice_websocket_endpoint(websocket: WebSocket) -> None:
+    """Real-time two-way WebSocket speech bridge for Voice Call HUD (Step 36)."""
+    from orion.voice.voice_call import handle_voice_websocket
+
+    await handle_voice_websocket(websocket)
+

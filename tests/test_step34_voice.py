@@ -9,6 +9,7 @@ import pytest
 from orion.tools.router import route_and_execute_tool
 from orion.voice import stt, tts
 from orion.voice.stt import VoiceLoopManager, extract_wake_command, get_voice_loop_manager
+from orion.voice.voice_call import get_voice_call_manager
 from orion.voice.tts import is_speaking, sanitize_for_speech, speak_text, stop_speaking
 
 
@@ -239,7 +240,8 @@ async def test_voice_loop_manager_bare_wake_word_followup():
 @pytest.mark.asyncio
 async def test_router_voice_commands():
     """Verify deterministic routing of say, start voice, stop voice, and voice status."""
-    with patch("orion.voice.tts.speak_text", new=AsyncMock(return_value=True)) as mock_speak:
+    with patch("orion.voice.tts.speak_text", new=AsyncMock(return_value=True)) as mock_speak, \
+         patch("orion.voice.voice_call.VoiceCallManager._open_hud_browser"):
         # 1. Say / Speak
         res_say = await route_and_execute_tool('say "Hello Yug"')
         assert res_say is not None
@@ -251,22 +253,22 @@ async def test_router_voice_commands():
         res_start = await route_and_execute_tool("start voice mode")
         assert res_start is not None
         assert res_start["handled"] is True
-        assert "🎙️ *Voice Mode Activated:*" in res_start["reply"]
-        assert get_voice_loop_manager().is_running is True
+        assert "JARVIS Voice Call Started" in res_start["reply"]
+        assert get_voice_call_manager().is_active is True
 
         # 3. Voice Status
         res_status = await route_and_execute_tool("voice status")
         assert res_status is not None
         assert res_status["handled"] is True
-        assert "🎙️ *Voice Mode Status:*" in res_status["reply"]
-        assert "• Listener: *Active*" in res_status["reply"]
+        assert "JARVIS Voice Call Status" in res_status["reply"]
+        assert "Call: *Active*" in res_status["reply"]
 
         # 4. Stop Voice Mode
         res_stop = await route_and_execute_tool("stop voice mode")
         assert res_stop is not None
         assert res_stop["handled"] is True
-        assert "🔇 *Voice Mode Deactivated:*" in res_stop["reply"]
-        assert get_voice_loop_manager().is_running is False
+        assert "JARVIS Voice Call Ended" in res_stop["reply"]
+        assert get_voice_call_manager().is_active is False
 
         # 5. Stop Speaking / Mute Voice
         with patch("orion.voice.tts.stop_speaking") as mock_stop_speak:
