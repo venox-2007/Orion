@@ -69,6 +69,22 @@ def test_get_voice_call_hud():
     assert "createAnalyser" in html
     assert "audio_b64" in html
 
+    # Speech-Boundary Audio Chunking & VAD (Step 36.2)
+    assert "SILENCE_TAIL_MS" in html
+    assert "1100" in html
+    assert "MIN_SPEECH_DURATION_MS" in html
+    assert "600" in html
+    assert "MAX_UTTERANCE_MS" in html
+    assert "8500" in html
+    assert "MIN_DISCARD_DURATION_MS" in html
+    assert "450" in html
+    assert "startRecordingChunk" in html
+    assert "handleRecorderStop" in html
+    assert "hasSpeech" in html
+    assert "speechStartMs" in html
+    # Verify fixed 3.5s interval slicing is eliminated
+    assert "3500" not in html
+
 
 def test_websocket_voice_direct_command():
     """Verify /ws/voice processes direct spoken commands and returns reply + speak_text."""

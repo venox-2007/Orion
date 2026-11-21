@@ -710,9 +710,19 @@ def get_hud_html() -> str:
     let micStream = null;
     let mediaRecorder = null;
     let audioChunks = [];
-    let voiceDetected = false;
     let isUsingLocalMicFallback = false;
-    let recorderInterval = null;
+    let isRecording = false;
+    let hasSpeech = false;
+    let speechStartMs = 0;
+    let silenceStartMs = 0;
+
+    // Speech-Boundary VAD thresholds (Step 36.2)
+    const SPEECH_THRESHOLD = 15;
+    const SILENCE_THRESHOLD = 12;
+    const SILENCE_TAIL_MS = 1100;
+    const MIN_SPEECH_DURATION_MS = 600;
+    const MAX_UTTERANCE_MS = 8500;
+    const MIN_DISCARD_DURATION_MS = 450;
 
     const orbWrapper = document.getElementById('orbWrapper');
     const orbCore = document.getElementById('orbCore');
@@ -848,10 +858,28 @@ def get_hud_html() -> str:
         analyser.fftSize = 512;
         source.connect(analyser);
 
-        // Real-time Voice Activity Orb Visualizer
+        isUsingLocalMicFallback = true;
+
+        // Start Speech-Boundary Voice Activity Detection & visual orb meter
         monitorVoiceActivity();
 
-        // Setup MediaRecorder
+        showBanner('🎙️ Local microphone streaming active (Brave/offline mode).');
+      } catch (err) {
+        console.error('Local mic capture error:', err);
+        showBanner('⚠️ Microphone permission denied: ' + (err.message || 'Cannot access audio device'));
+        setOrbState('muted');
+      }
+    }
+
+    function startRecordingChunk() {
+      if (isRecording || isSpeaking || isMuted || !callActive || !micStream) return;
+      try {
+        audioChunks = [];
+        hasSpeech = true;
+        speechStartMs = performance.now();
+        silenceStartMs = 0;
+        isRecording = true;
+
         let mimeType = 'audio/webm';
         if (typeof MediaRecorder !== 'undefined') {
           if (!MediaRecorder.isTypeSupported('audio/webm') && MediaRecorder.isTypeSupported('audio/mp4')) {
@@ -867,37 +895,32 @@ def get_hud_html() -> str:
           }
         };
 
-        mediaRecorder.onstop = async () => {
-          if (audioChunks.length > 0 && voiceDetected) {
-            const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-            audioChunks = [];
-            voiceDetected = false;
-            await sendAudioBlob(audioBlob);
-          } else {
-            audioChunks = [];
-            voiceDetected = false;
-          }
-          if (callActive && !isMuted && isUsingLocalMicFallback && !isSpeaking) {
-            try { mediaRecorder.start(); } catch (e) {}
-          }
-        };
-
-        isUsingLocalMicFallback = true;
+        mediaRecorder.onstop = handleRecorderStop;
         mediaRecorder.start();
-
-        // 3.5-second chunk rotation
-        if (recorderInterval) clearInterval(recorderInterval);
-        recorderInterval = setInterval(() => {
-          if (isUsingLocalMicFallback && mediaRecorder && mediaRecorder.state === 'recording' && !isSpeaking) {
-            try { mediaRecorder.stop(); } catch (e) {}
-          }
-        }, 3500);
-
-        showBanner('🎙️ Local microphone streaming active (Brave/offline mode).');
       } catch (err) {
-        console.error('Local mic capture error:', err);
-        showBanner('⚠️ Microphone permission denied: ' + (err.message || 'Cannot access audio device'));
-        setOrbState('muted');
+        console.error('Error starting mediaRecorder:', err);
+        isRecording = false;
+        hasSpeech = false;
+      }
+    }
+
+    async function handleRecorderStop() {
+      const duration = performance.now() - speechStartMs;
+      // Discard pure noise: only forward if hasSpeech is true and duration >= 450ms
+      if (audioChunks.length > 0 && hasSpeech && duration >= MIN_DISCARD_DURATION_MS) {
+        const audioBlob = new Blob(audioChunks, { type: (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm' });
+        audioChunks = [];
+        hasSpeech = false;
+        isRecording = false;
+        await sendAudioBlob(audioBlob);
+      } else {
+        // Discard short clicks or noise without valid speech
+        audioChunks = [];
+        hasSpeech = false;
+        isRecording = false;
+        if (callActive && !isMuted && !isSpeaking) {
+          setOrbState('listening');
+        }
       }
     }
 
@@ -910,27 +933,72 @@ def get_hud_html() -> str:
           requestAnimationFrame(checkLevel);
           return;
         }
+
         analyser.getByteFrequencyData(buffer);
         let sum = 0;
         for (let i = 0; i < buffer.length; i++) {
           sum += buffer[i];
         }
         const avg = sum / buffer.length;
+        const now = performance.now();
 
-        // Animate orb dynamically based on voice level
-        if (avg > 14) {
-          voiceDetected = true;
-          if (!isSpeaking) {
-            const scale = 1.0 + Math.min(0.4, (avg / 70) * 0.4);
-            orbCore.style.transform = `scale(${scale})`;
+        // 1. Orb Visualizer
+        if (avg > SILENCE_THRESHOLD && !isSpeaking) {
+          const scale = 1.0 + Math.min(0.4, (avg / 70) * 0.4);
+          orbCore.style.transform = `scale(${scale})`;
+        } else if (!isSpeaking) {
+          orbCore.style.transform = 'scale(1)';
+        }
+
+        // Do not record while ORION is speaking
+        if (isSpeaking) {
+          if (mediaRecorder && mediaRecorder.state === 'recording') {
+            try { mediaRecorder.stop(); } catch (e) {}
           }
-        } else {
-          if (!isSpeaking) {
-            orbCore.style.transform = 'scale(1)';
+          isRecording = false;
+          hasSpeech = false;
+          requestAnimationFrame(checkLevel);
+          return;
+        }
+
+        // 2. Voice Start Detection
+        if (avg >= SPEECH_THRESHOLD) {
+          silenceStartMs = 0;
+          if (!isRecording) {
+            startRecordingChunk();
+          } else {
+            hasSpeech = true;
           }
         }
+
+        // 3. Silence Tail / End-of-Utterance & Max Utterance Cap
+        if (isRecording && mediaRecorder && mediaRecorder.state === 'recording') {
+          const duration = now - speechStartMs;
+
+          // Max Utterance Cap: if speaking continuously > 8.5s (8500ms), flush current chunk
+          if (duration >= MAX_UTTERANCE_MS) {
+            try {
+              mediaRecorder.stop();
+            } catch (e) {}
+            isRecording = false;
+          }
+          // Silence Tail: volume dropped below silence threshold
+          else if (avg < SILENCE_THRESHOLD) {
+            if (!silenceStartMs) {
+              silenceStartMs = now;
+            } else if (now - silenceStartMs >= SILENCE_TAIL_MS && duration >= MIN_SPEECH_DURATION_MS) {
+              try {
+                mediaRecorder.stop();
+              } catch (e) {}
+              isRecording = false;
+              silenceStartMs = 0;
+            }
+          }
+        }
+
         requestAnimationFrame(checkLevel);
       }
+
       checkLevel();
     }
 
@@ -1131,9 +1199,8 @@ def get_hud_html() -> str:
       if (mediaRecorder) {
         try { mediaRecorder.stop(); } catch (e) {}
       }
-      if (recorderInterval) {
-        clearInterval(recorderInterval);
-      }
+      isRecording = false;
+      hasSpeech = false;
       if (micStream) {
         try { micStream.getTracks().forEach(t => t.stop()); } catch (e) {}
       }
