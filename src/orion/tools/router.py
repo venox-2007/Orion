@@ -2150,6 +2150,30 @@ async def check_deterministic_voice_query(
     return None
 
 
+def check_deterministic_greeting_query(
+    clean_text: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Deterministically check for voice greetings and wake calls without requiring LLM inference (Step 36.1)."""
+    clean = clean_text.strip().lower()
+    clean_no_punct = re.sub(r"[^\w\s]", "", clean).strip()
+
+    is_voice = bool(context and (context.get("_voice") or context.get("source") in ("voice", "voice_call")))
+    voice_greetings = {
+        "hello", "hi", "hey", "hey orion", "hi orion", "hello orion",
+        "are you there", "you there", "are you online", "good morning",
+        "good afternoon", "good evening", "greetings", "orion", "ok orion",
+    }
+
+    if clean_no_punct in ("hey orion", "hi orion", "hello orion", "are you there", "you there", "are you online"):
+        return {"handled": True, "reply": "Online and ready, Yug. How can I help?"}
+
+    if is_voice and clean_no_punct in voice_greetings:
+        return {"handled": True, "reply": "Online and ready, Yug. How can I help?"}
+
+    return None
+
+
 def check_deterministic_mouse_query(
     clean_text: str,
     context: dict[str, Any] | None = None,
@@ -2882,6 +2906,11 @@ async def route_and_execute_tool(
     voice_res = await check_deterministic_voice_query(clean_text, context=context)
     if voice_res:
         return voice_res
+
+    # 0.7. Deterministic voice greetings & wake check (Step 36.1)
+    greeting_res = check_deterministic_greeting_query(clean_text, context=context)
+    if greeting_res:
+        return greeting_res
 
     # 1. Deterministic multi-action and sequential command detection
     multi_res = check_deterministic_multi_action(clean_text)

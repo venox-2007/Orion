@@ -104,3 +104,22 @@ class VoiceTranscriber:
                 asyncio.to_thread(self.transcribe, audio_path),
                 timeout=timeout,
             )
+
+
+_VOICE_TRANSCRIBER_INSTANCE: VoiceTranscriber | None = None
+
+
+def get_voice_transcriber() -> VoiceTranscriber:
+    """Return singleton VoiceTranscriber instance using app settings."""
+    global _VOICE_TRANSCRIBER_INSTANCE
+    if _VOICE_TRANSCRIBER_INSTANCE is None:
+        from orion.config.settings import get_settings
+
+        settings = get_settings()
+        _VOICE_TRANSCRIBER_INSTANCE = VoiceTranscriber(
+            model_size=settings.whisper_model,
+            device=settings.whisper_device,
+            compute_type=settings.whisper_compute_type,
+            download_root=settings.whisper_download_root,
+        )
+    return _VOICE_TRANSCRIBER_INSTANCE

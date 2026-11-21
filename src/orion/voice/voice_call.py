@@ -1,13 +1,15 @@
-"""Real-time JARVIS Voice Call HUD and WebSocket speech bridge for ORION (Step 36)."""
+"""Real-time JARVIS Voice Call HUD and WebSocket speech bridge for ORION (Steps 36 & 36.1)."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 from typing import Any
 import webbrowser
 
@@ -134,6 +136,38 @@ def get_voice_call_manager() -> VoiceCallManager:
     return _VOICE_CALL_MANAGER
 
 
+async def transcribe_audio_payload(audio_b64: str, mime_type: str = "audio/webm") -> str:
+    """Decode base64 audio and transcribe asynchronously using VoiceTranscriber (Step 36.1)."""
+    if not audio_b64:
+        return ""
+
+    ext = ".wav" if "wav" in mime_type.lower() else ".webm"
+    tmp_path: Path | None = None
+    try:
+        audio_bytes = base64.b64decode(audio_b64)
+        if len(audio_bytes) == 0:
+            return ""
+
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp_file:
+            tmp_file.write(audio_bytes)
+            tmp_path = Path(tmp_file.name)
+
+        from orion.voice.transcriber import get_voice_transcriber
+
+        transcriber = get_voice_transcriber()
+        text = await transcriber.transcribe_async(tmp_path, timeout=20.0)
+        return text.strip()
+    except Exception as err:
+        logger.error("Audio payload transcription error: %s", err)
+        return ""
+    finally:
+        if tmp_path and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+
 async def handle_voice_websocket(websocket: WebSocket) -> None:
     """Handle real-time two-way voice communication over WebSocket."""
     await websocket.accept()
@@ -159,11 +193,24 @@ async def handle_voice_websocket(websocket: WebSocket) -> None:
                 await websocket.send_json({"action": "end_call"})
                 break
 
-            spoken_text = str(payload.get("text", "")).strip()
+            spoken_text = ""
+            require_wake_word = bool(payload.get("require_wake_word", False))
+
+            # 1. Handle base64 audio payload (Brave / local mic streaming)
+            if "audio_b64" in payload:
+                audio_b64 = payload["audio_b64"]
+                mime_type = payload.get("mime_type", "audio/webm")
+                spoken_text = await transcribe_audio_payload(audio_b64, mime_type=mime_type)
+                if not spoken_text:
+                    await websocket.send_json(
+                        {"transcript": "", "reply": "", "speak_text": ""}
+                    )
+                    continue
+            else:
+                spoken_text = str(payload.get("text", "")).strip()
+
             if not spoken_text:
                 continue
-
-            require_wake_word = bool(payload.get("require_wake_word", False))
 
             target_cmd: str | None = None
             if require_wake_word:
@@ -173,7 +220,7 @@ async def handle_voice_websocket(websocket: WebSocket) -> None:
                     continue
                 if not cmd:
                     # Bare wake word was spoken
-                    reply = "Yes? I am listening."
+                    reply = "Online and ready, Yug. How can I help?"
                     await websocket.send_json(
                         {
                             "transcript": spoken_text,
@@ -302,20 +349,35 @@ def get_hud_html() -> str:
       box-shadow: 0 0 8px var(--cyan);
     }
 
+    .hud-banner {
+      width: 100%;
+      max-width: 800px;
+      background: rgba(255, 170, 0, 0.15);
+      border: 1px solid var(--amber);
+      color: var(--amber);
+      padding: 0.65rem 1rem;
+      border-radius: 10px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      text-align: center;
+      margin-top: 0.85rem;
+      transition: all 0.3s ease;
+    }
+
     /* Central Orb HUD */
     .hud-center {
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      margin: 1.5rem 0;
-      gap: 1.25rem;
+      margin: 1rem 0;
+      gap: 1rem;
     }
 
     .orb-wrapper {
       position: relative;
-      width: 170px;
-      height: 170px;
+      width: 160px;
+      height: 160px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -332,12 +394,12 @@ def get_hud_html() -> str:
     }
 
     .orb-core {
-      width: 110px;
-      height: 110px;
+      width: 100px;
+      height: 100px;
       border-radius: 50%;
       background: radial-gradient(circle, var(--cyan) 0%, rgba(0, 112, 243, 0.4) 60%, transparent 100%);
       box-shadow: 0 0 40px var(--cyan-glow);
-      transition: all 0.4s ease;
+      transition: transform 0.12s ease-out, background 0.4s ease, box-shadow 0.4s ease;
       animation: pulseCore 2.5s ease-in-out infinite;
     }
 
@@ -374,12 +436,12 @@ def get_hud_html() -> str:
     }
 
     .orb-status-text {
-      font-size: 1.1rem;
+      font-size: 1.05rem;
       font-weight: 600;
       letter-spacing: 0.1em;
       text-transform: uppercase;
       color: var(--cyan);
-      min-height: 1.6rem;
+      min-height: 1.5rem;
     }
 
     /* Transcript Card */
@@ -395,8 +457,8 @@ def get_hud_html() -> str:
       backdrop-filter: blur(12px);
       box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
       flex: 1;
-      min-height: 240px;
-      max-height: 380px;
+      min-height: 220px;
+      max-height: 340px;
     }
 
     .transcript-header {
@@ -461,6 +523,51 @@ def get_hud_html() -> str:
       margin-top: 0.5rem;
     }
 
+    /* Interactive Text Input Bar (Step 36.1) */
+    .text-input-bar {
+      width: 100%;
+      max-width: 800px;
+      display: flex;
+      gap: 0.6rem;
+      margin-top: 0.85rem;
+    }
+
+    .text-input-bar input {
+      flex: 1;
+      background: rgba(13, 20, 36, 0.85);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 0.75rem 1rem;
+      border-radius: 12px;
+      font-size: 0.92rem;
+      outline: none;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .text-input-bar input:focus {
+      border-color: var(--cyan);
+      box-shadow: 0 0 12px var(--cyan-glow);
+    }
+
+    .text-input-bar button {
+      background: rgba(0, 240, 255, 0.15);
+      border: 1px solid var(--cyan);
+      color: var(--cyan);
+      padding: 0.75rem 1.4rem;
+      border-radius: 12px;
+      font-size: 0.92rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      user-select: none;
+    }
+
+    .text-input-bar button:hover {
+      background: var(--cyan);
+      color: #070b12;
+      box-shadow: 0 0 15px var(--cyan-glow);
+    }
+
     /* Controls Bar */
     .controls-bar {
       width: 100%;
@@ -468,7 +575,7 @@ def get_hud_html() -> str:
       display: flex;
       gap: 1rem;
       justify-content: center;
-      margin-top: 1.25rem;
+      margin-top: 1rem;
       flex-wrap: wrap;
     }
 
@@ -520,7 +627,7 @@ def get_hud_html() -> str:
 
     @keyframes pulseCore {
       0%, 100% { transform: scale(1); opacity: 0.9; }
-      50% { transform: scale(1.08); opacity: 1; }
+      50% { transform: scale(1.06); opacity: 1; }
     }
 
     @keyframes pulseSpeaking {
@@ -547,10 +654,12 @@ def get_hud_html() -> str:
     </div>
   </header>
 
+  <div class="hud-banner" id="hudBanner" style="display:none;"></div>
+
   <main class="hud-center">
     <div class="orb-wrapper" id="orbWrapper">
       <div class="orb-ring"></div>
-      <div class="orb-core"></div>
+      <div class="orb-core" id="orbCore"></div>
     </div>
     <div class="orb-status-text" id="orbStatus">Listening...</div>
   </main>
@@ -560,11 +669,16 @@ def get_hud_html() -> str:
     <div class="messages-container" id="messagesContainer">
       <div class="message orion">
         <span class="msg-label">ORION</span>
-        JARVIS Voice Call established. Speak your command or say "Orion" to begin.
+        JARVIS Voice Call established. Speak your command or type below.
       </div>
     </div>
     <div class="interim-preview" id="interimPreview"></div>
   </section>
+
+  <form class="text-input-bar" id="textInputForm" onsubmit="handleTextSubmit(event)">
+    <input type="text" id="cmdInput" placeholder="Type a command or speak (e.g. 'where is my mouse', 'coding mode')..." autocomplete="off" />
+    <button type="submit" id="sendBtn">Send</button>
+  </form>
 
   <footer class="controls-bar">
     <button class="btn" id="muteBtn" onclick="toggleMute()">
@@ -588,8 +702,20 @@ def get_hud_html() -> str:
     let isSpeaking = false;
     let requireWakeWord = false;
     let callActive = true;
+    let lastSentText = null;
+
+    // Local Mic Streaming (MediaRecorder + Web Audio API for Brave/Chromium fallback)
+    let audioCtx = null;
+    let analyser = null;
+    let micStream = null;
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let voiceDetected = false;
+    let isUsingLocalMicFallback = false;
+    let recorderInterval = null;
 
     const orbWrapper = document.getElementById('orbWrapper');
+    const orbCore = document.getElementById('orbCore');
     const orbStatus = document.getElementById('orbStatus');
     const connPill = document.getElementById('connPill');
     const pillDot = document.getElementById('pillDot');
@@ -599,12 +725,21 @@ def get_hud_html() -> str:
     const muteText = document.getElementById('muteText');
     const muteIcon = document.getElementById('muteIcon');
     const modeText = document.getElementById('modeText');
+    const hudBanner = document.getElementById('hudBanner');
+
+    function showBanner(message) {
+      if (hudBanner) {
+        hudBanner.innerText = message;
+        hudBanner.style.display = 'block';
+      }
+    }
 
     function setOrbState(state) {
       orbWrapper.className = 'orb-wrapper ' + state;
       if (state === 'listening') {
         orbStatus.innerText = 'Listening...';
         orbStatus.style.color = 'var(--cyan)';
+        orbCore.style.transform = 'scale(1)';
       } else if (state === 'thinking') {
         orbStatus.innerText = 'Thinking...';
         orbStatus.style.color = 'var(--amber)';
@@ -614,9 +749,11 @@ def get_hud_html() -> str:
       } else if (state === 'muted') {
         orbStatus.innerText = 'Muted';
         orbStatus.style.color = 'var(--red)';
+        orbCore.style.transform = 'scale(0.9)';
       } else if (state === 'ended') {
         orbStatus.innerText = 'Call Ended';
         orbStatus.style.color = 'var(--text-muted)';
+        orbCore.style.transform = 'scale(0.85)';
       }
     }
 
@@ -660,6 +797,12 @@ def get_hud_html() -> str:
             hangUp(false);
             return;
           }
+          if (data.transcript) {
+            interimPreview.innerText = '';
+            if (data.transcript !== lastSentText) {
+              appendMessage('You', data.transcript);
+            }
+          }
           if (data.reply) {
             appendMessage('ORION', data.reply);
           }
@@ -690,68 +833,208 @@ def get_hud_html() -> str:
       };
     }
 
+    /* Fallback: Local Mic Streaming via MediaRecorder & Web Audio API (Brave-compatible) */
+    async function startLocalMicFallback(reasonMessage) {
+      if (reasonMessage) {
+        showBanner(reasonMessage);
+      }
+      if (isUsingLocalMicFallback || isMuted || !callActive) return;
+
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioCtx.createMediaStreamSource(micStream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 512;
+        source.connect(analyser);
+
+        // Real-time Voice Activity Orb Visualizer
+        monitorVoiceActivity();
+
+        // Setup MediaRecorder
+        let mimeType = 'audio/webm';
+        if (typeof MediaRecorder !== 'undefined') {
+          if (!MediaRecorder.isTypeSupported('audio/webm') && MediaRecorder.isTypeSupported('audio/mp4')) {
+            mimeType = 'audio/mp4';
+          }
+        }
+        const options = mimeType ? { mimeType } : {};
+        mediaRecorder = new MediaRecorder(micStream, options);
+
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) {
+            audioChunks.push(e.data);
+          }
+        };
+
+        mediaRecorder.onstop = async () => {
+          if (audioChunks.length > 0 && voiceDetected) {
+            const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+            audioChunks = [];
+            voiceDetected = false;
+            await sendAudioBlob(audioBlob);
+          } else {
+            audioChunks = [];
+            voiceDetected = false;
+          }
+          if (callActive && !isMuted && isUsingLocalMicFallback && !isSpeaking) {
+            try { mediaRecorder.start(); } catch (e) {}
+          }
+        };
+
+        isUsingLocalMicFallback = true;
+        mediaRecorder.start();
+
+        // 3.5-second chunk rotation
+        if (recorderInterval) clearInterval(recorderInterval);
+        recorderInterval = setInterval(() => {
+          if (isUsingLocalMicFallback && mediaRecorder && mediaRecorder.state === 'recording' && !isSpeaking) {
+            try { mediaRecorder.stop(); } catch (e) {}
+          }
+        }, 3500);
+
+        showBanner('🎙️ Local microphone streaming active (Brave/offline mode).');
+      } catch (err) {
+        console.error('Local mic capture error:', err);
+        showBanner('⚠️ Microphone permission denied: ' + (err.message || 'Cannot access audio device'));
+        setOrbState('muted');
+      }
+    }
+
+    function monitorVoiceActivity() {
+      if (!analyser) return;
+      const buffer = new Uint8Array(analyser.frequencyBinCount);
+
+      function checkLevel() {
+        if (!callActive || isMuted) {
+          requestAnimationFrame(checkLevel);
+          return;
+        }
+        analyser.getByteFrequencyData(buffer);
+        let sum = 0;
+        for (let i = 0; i < buffer.length; i++) {
+          sum += buffer[i];
+        }
+        const avg = sum / buffer.length;
+
+        // Animate orb dynamically based on voice level
+        if (avg > 14) {
+          voiceDetected = true;
+          if (!isSpeaking) {
+            const scale = 1.0 + Math.min(0.4, (avg / 70) * 0.4);
+            orbCore.style.transform = `scale(${scale})`;
+          }
+        } else {
+          if (!isSpeaking) {
+            orbCore.style.transform = 'scale(1)';
+          }
+        }
+        requestAnimationFrame(checkLevel);
+      }
+      checkLevel();
+    }
+
+    async function sendAudioBlob(blob) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      setOrbState('thinking');
+      interimPreview.innerText = 'Transcribing voice chunk...';
+
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64Data = reader.result.split(',')[1];
+        ws.send(JSON.stringify({
+          audio_b64: base64Data,
+          mime_type: blob.type || 'audio/webm',
+          require_wake_word: requireWakeWord
+        }));
+      };
+      reader.readAsDataURL(blob);
+    }
+
     function initSpeechRecognition() {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SpeechRecognition) {
-        orbStatus.innerText = 'SpeechRec Not Supported (Use Brave/Chrome)';
-        orbStatus.style.color = 'var(--red)';
+        startLocalMicFallback('⚠️ Web Speech API not supported — using local mic stream.');
         return;
       }
 
-      recognition = new SpeechRecognition();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = 'en-IN';
-
-      recognition.onresult = (event) => {
-        if (isMuted || isSpeaking) return;
-
-        let interim = '';
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          const trans = event.results[i][0].transcript;
-          if (event.results[i].isFinal) {
-            const finalClean = trans.trim();
-            if (finalClean) {
-              appendMessage('You', finalClean);
-              interimPreview.innerText = '';
-              setOrbState('thinking');
-              sendSpeech(finalClean);
-            }
-          } else {
-            interim += trans;
-          }
-        }
-        interimPreview.innerText = interim;
-      };
-
-      recognition.onerror = (event) => {
-        console.warn('SpeechRec error:', event.error);
-        if (event.error === 'not-allowed') {
-          orbStatus.innerText = 'Microphone Blocked';
-          orbStatus.style.color = 'var(--red)';
-        }
-      };
-
-      recognition.onend = () => {
-        // Automatically restart speech recognition if call is active and not speaking/muted
-        if (callActive && !isMuted && !isSpeaking) {
-          try { recognition.start(); } catch (e) {}
-        }
-      };
-
       try {
+        recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-IN';
+
+        recognition.onresult = (event) => {
+          if (isMuted || isSpeaking) return;
+
+          let interim = '';
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            const trans = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+              const finalClean = trans.trim();
+              if (finalClean) {
+                lastSentText = finalClean;
+                appendMessage('You', finalClean);
+                interimPreview.innerText = '';
+                setOrbState('thinking');
+                sendSpeech(finalClean);
+              }
+            } else {
+              interim += trans;
+            }
+          }
+          interimPreview.innerText = interim;
+        };
+
+        recognition.onerror = (event) => {
+          console.warn('SpeechRec error:', event.error);
+          if (event.error === 'network' || event.error === 'service-not-allowed' || event.error === 'not-allowed') {
+            showBanner('⚠️ Brave blocked Web Speech API — switching to local mic stream...');
+            try { recognition.abort(); } catch (e) {}
+            recognition = null;
+            startLocalMicFallback();
+          } else {
+            showBanner('⚠️ Speech recognition notice: ' + event.error);
+          }
+        };
+
+        recognition.onend = () => {
+          if (callActive && !isMuted && !isSpeaking && !isUsingLocalMicFallback && recognition) {
+            try { recognition.start(); } catch (e) {}
+          }
+        };
+
         recognition.start();
-      } catch (e) {
-        console.debug('Recognition start issue:', e);
+      } catch (err) {
+        console.warn('Recognition start exception, falling back:', err);
+        startLocalMicFallback('⚠️ Speech recognition unavailable — using local mic stream.');
       }
     }
 
     function sendSpeech(text) {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      lastSentText = text;
       ws.send(JSON.stringify({
         text: text,
         require_wake_word: requireWakeWord
       }));
+    }
+
+    function handleTextSubmit(e) {
+      e.preventDefault();
+      const inp = document.getElementById('cmdInput');
+      const text = inp.value.trim();
+      if (!text) return;
+      inp.value = '';
+      lastSentText = text;
+      appendMessage('You', text);
+      setOrbState('thinking');
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          text: text,
+          require_wake_word: false
+        }));
+      }
     }
 
     function speakAloud(text) {
@@ -764,7 +1047,7 @@ def get_hud_html() -> str:
       isSpeaking = true;
       setOrbState('speaking');
 
-      // Temporarily halt mic recognition while ORION speaks to prevent audio feedback
+      // Temporarily halt mic inputs while ORION speaks to prevent audio feedback
       if (recognition) {
         try { recognition.stop(); } catch (e) {}
       }
@@ -776,7 +1059,9 @@ def get_hud_html() -> str:
         isSpeaking = false;
         if (callActive && !isMuted) {
           setOrbState('listening');
-          try { recognition.start(); } catch (e) {}
+          if (recognition) {
+            try { recognition.start(); } catch (e) {}
+          }
         }
       };
 
@@ -784,7 +1069,9 @@ def get_hud_html() -> str:
         isSpeaking = false;
         if (callActive && !isMuted) {
           setOrbState('listening');
-          try { recognition.start(); } catch (e) {}
+          if (recognition) {
+            try { recognition.start(); } catch (e) {}
+          }
         }
       };
 
@@ -801,12 +1088,18 @@ def get_hud_html() -> str:
         if (recognition) {
           try { recognition.stop(); } catch (e) {}
         }
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+          try { mediaRecorder.pause(); } catch (e) {}
+        }
       } else {
         muteText.innerText = 'Mute Mic';
         muteIcon.innerText = '🎙️';
         setOrbState('listening');
         if (recognition) {
           try { recognition.start(); } catch (e) {}
+        }
+        if (mediaRecorder && mediaRecorder.state === 'paused') {
+          try { mediaRecorder.resume(); } catch (e) {}
         }
       }
     }
@@ -834,6 +1127,15 @@ def get_hud_html() -> str:
       }
       if (recognition) {
         try { recognition.stop(); } catch (e) {}
+      }
+      if (mediaRecorder) {
+        try { mediaRecorder.stop(); } catch (e) {}
+      }
+      if (recorderInterval) {
+        clearInterval(recorderInterval);
+      }
+      if (micStream) {
+        try { micStream.getTracks().forEach(t => t.stop()); } catch (e) {}
       }
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();

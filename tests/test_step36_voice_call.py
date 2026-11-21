@@ -1,9 +1,10 @@
-"""Tests for Step 36 — Live JARVIS Voice Call HUD (Real-Time Browser/WebSocket Voice Interface)."""
+"""Tests for Step 36 & 36.1 — Live JARVIS Voice Call HUD (Brave Local Mic & WebSocket Speech Bridge)."""
 
 from __future__ import annotations
 
+import base64
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 import pytest
 
@@ -24,7 +25,7 @@ def cleanup_voice_call():
 
 
 def test_get_voice_call_hud():
-    """Verify GET /voice-call returns 200 HTML with JARVIS HUD elements and JS speech APIs."""
+    """Verify GET /voice-call returns 200 HTML with JARVIS HUD elements and Brave mic fallback APIs."""
     client = TestClient(app)
     response = client.get("/voice-call")
 
@@ -42,6 +43,12 @@ def test_get_voice_call_hud():
     assert "messagesContainer" in html
     assert "interimPreview" in html
     assert "connPill" in html
+    assert "hudBanner" in html
+
+    # Interactive Text Input Bar (Step 36.1)
+    assert "textInputForm" in html
+    assert "cmdInput" in html
+    assert "sendBtn" in html
 
     # Controls
     assert "muteBtn" in html
@@ -54,6 +61,13 @@ def test_get_voice_call_hud():
     assert "speechSynthesis" in html
     assert "SpeechSynthesisUtterance" in html
     assert "/ws/voice" in html
+
+    # Brave / Local Mic Fallback APIs (Step 36.1)
+    assert "getUserMedia" in html
+    assert "MediaRecorder" in html
+    assert "AudioContext" in html
+    assert "createAnalyser" in html
+    assert "audio_b64" in html
 
 
 def test_websocket_voice_direct_command():
@@ -82,6 +96,64 @@ def test_websocket_voice_direct_command():
         assert "<" not in data["speak_text"] and ">" not in data["speak_text"]
 
 
+def test_websocket_voice_audio_blob_streaming():
+    """Verify /ws/voice decodes and transcribes base64 audio chunks (Brave fallback mode)."""
+    fake_audio_bytes = b"RIFF....WAVEfmt ...."
+    fake_audio_b64 = base64.b64encode(fake_audio_bytes).decode("utf-8")
+
+    client = TestClient(app)
+    with patch(
+        "orion.voice.transcriber.VoiceTranscriber.transcribe_async",
+        new=AsyncMock(return_value="where is my mouse"),
+    ):
+        with client.websocket_connect("/ws/voice") as ws:
+            payload = {
+                "audio_b64": fake_audio_b64,
+                "mime_type": "audio/webm",
+                "require_wake_word": False,
+            }
+            ws.send_text(json.dumps(payload))
+
+            resp_raw = ws.receive_text()
+            data = json.loads(resp_raw)
+
+            assert data["transcript"] == "where is my mouse"
+            assert "Cursor Position" in data["reply"]
+            assert "Cursor Position" in data["speak_text"]
+
+
+def test_websocket_voice_greetings_without_ollama():
+    """Verify simple voice greetings respond immediately without Ollama inference."""
+    client = TestClient(app)
+    with client.websocket_connect("/ws/voice") as ws:
+        # 1. "hello"
+        ws.send_text(json.dumps({"text": "hello", "require_wake_word": False}))
+        resp_hello = json.loads(ws.receive_text())
+        assert resp_hello["transcript"] == "hello"
+        assert "Online and ready, Yug. How can I help?" in resp_hello["reply"]
+        assert "Online and ready, Yug. How can I help?" in resp_hello["speak_text"]
+
+        # 2. "are you there"
+        ws.send_text(json.dumps({"text": "are you there", "require_wake_word": False}))
+        resp_there = json.loads(ws.receive_text())
+        assert resp_there["transcript"] == "are you there"
+        assert "Online and ready, Yug. How can I help?" in resp_there["reply"]
+
+
+@pytest.mark.asyncio
+async def test_router_greetings_without_ollama():
+    """Verify deterministic routing for 'hey orion' and 'are you there' without Ollama."""
+    res_hey = await route_and_execute_tool("hey orion")
+    assert res_hey is not None
+    assert res_hey["handled"] is True
+    assert "Online and ready, Yug. How can I help?" in res_hey["reply"]
+
+    res_there = await route_and_execute_tool("are you there")
+    assert res_there is not None
+    assert res_there["handled"] is True
+    assert "Online and ready, Yug. How can I help?" in res_there["reply"]
+
+
 def test_websocket_wake_word_filtering():
     """Verify wake-word mode filters phrases without wake word and executes valid ones."""
     client = TestClient(app)
@@ -94,8 +166,7 @@ def test_websocket_wake_word_filtering():
         ws.send_text(json.dumps(payload_bare))
         resp_bare = json.loads(ws.receive_text())
         assert resp_bare["transcript"] == "Orion"
-        assert "Yes?" in resp_bare["reply"]
-        assert "Yes?" in resp_bare["speak_text"]
+        assert "Online and ready, Yug. How can I help?" in resp_bare["reply"]
 
         # 2. Wake word + command executes successfully
         payload_cmd = {
